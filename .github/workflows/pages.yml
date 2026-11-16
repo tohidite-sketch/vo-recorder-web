@@ -1,0 +1,53 @@
+name: Publish VO Recorder
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the site and draw the app icons
+        run: |
+          mkdir -p site
+          cp index.html manifest.webmanifest site/
+          pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw
+          S = 1024
+          im = Image.new('RGB', (S, S), (46, 110, 104))          # teal background
+          d = ImageDraw.Draw(im)
+          c = S / 2
+          r = S * 0.25
+          d.ellipse([c - r, c - r, c + r, c + r], outline=(255, 255, 255), width=int(S * 0.04))
+          r2 = S * 0.16
+          d.ellipse([c - r2, c - r2, c + r2, c + r2], fill=(226, 104, 95))   # coral record dot
+          for size in (180, 192, 512):
+              im.resize((size, size), Image.LANCZOS).save(f'site/icon-{size}.png')
+          PY
+          ls -la site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
