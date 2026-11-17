@@ -1441,13 +1441,55 @@ svg { display: block; }
     g.restore();
   }
 
+  // iPhone's browser can say a setting is supported and then refuse it when encoding starts
+  // (its hardware encoder has size limits). So each candidate is proven by encoding one real frame.
+  function probeEncoder(cfg) {
+    return new Promise((resolve) => {
+      let got = false, bad = false, settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      const timer = setTimeout(() => done(false), 5000);
+      let enc;
+      try {
+        enc = new VideoEncoder({ output: () => { got = true; }, error: () => { bad = true; } });
+        enc.configure(cfg);
+        const c = document.createElement('canvas');
+        c.width = cfg.width; c.height = cfg.height;
+        const g = c.getContext('2d');
+        g.fillStyle = '#123'; g.fillRect(0, 0, c.width, c.height);
+        const f = new VideoFrame(c, { timestamp: 0 });
+        enc.encode(f, { keyFrame: true });
+        f.close();
+        enc.flush().then(() => { clearTimeout(timer); try { enc.close(); } catch (e) {} done(got && !bad); },
+          () => { clearTimeout(timer); try { enc.close(); } catch (e) {} done(false); });
+      } catch (err) {
+        clearTimeout(timer);
+        try { if (enc) enc.close(); } catch (e) {}
+        done(false);
+      }
+    });
+  }
+
   async function pickVideoConfig(W, H, fps) {
-    const codecs = ['avc1.640033', 'avc1.640034', 'avc1.4d0033', 'avc1.42e033', 'avc1.640028'];
-    for (const scale of [1, 0.75, 0.5]) {
-      const w = Math.round(W * scale / 2) * 2, h = Math.round(H * scale / 2) * 2;
-      for (const codec of codecs) {
-        const cfg = { codec, width: w, height: h, bitrate: bitsNow(), framerate: fps, avc: { format: 'avc' } };
-        try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (err) {}
+    const sizes = [];
+    const addSize = (maxLong) => {
+      const s = Math.min(1, maxLong / Math.max(W, H));
+      const w = Math.round(W * s / 2) * 2, h = Math.round(H * s / 2) * 2;
+      if (!sizes.some((x) => x[0] === w && x[1] === h)) sizes.push([w, h]);
+    };
+    [1e9, 3840, 2560, 1920, 1280].forEach(addSize);
+    const kinds = [
+      { codec: 'avc1.640033', mux: 'avc', extra: { avc: { format: 'avc' } } },
+      { codec: 'avc1.4d0033', mux: 'avc', extra: { avc: { format: 'avc' } } },
+      { codec: 'avc1.42e033', mux: 'avc', extra: { avc: { format: 'avc' } } },
+      { codec: 'hvc1.1.6.L153.B0', mux: 'hevc', extra: { hevc: { format: 'hevc' } } },
+      { codec: 'avc1.640033', mux: 'avc', extra: {} },
+    ];
+    for (const [w, h] of sizes) {
+      for (const k of kinds) {
+        const cfg = Object.assign({ codec: k.codec, width: w, height: h, bitrate: bitsNow(), framerate: fps }, k.extra);
+        let ok = false;
+        try { ok = (await VideoEncoder.isConfigSupported(cfg)).supported; } catch (err) {}
+        if (ok && await probeEncoder(cfg)) { cfg.mux = k.mux; return cfg; }
       }
     }
     return null;
@@ -1479,8 +1521,11 @@ svg { display: block; }
     let H = p0.rot % 180 ? p0.track.video.width : p0.track.video.height;
     const cap = Math.min(1, Math.sqrt(8847360 / (W * H)));
     W = Math.round(W * cap / 2) * 2; H = Math.round(H * cap / 2) * 2;
+    el.joinText.textContent = 'Checking what this phone can encode…';
     const vcfg = await pickVideoConfig(W, H, fps);
-    if (!vcfg) throw new Error('this phone cannot make an H.264 video at this size');
+    if (!vcfg) throw new Error('this phone refused every video encoder setting');
+    const muxCodec = vcfg.mux;
+    delete vcfg.mux;
     W = vcfg.width; H = vcfg.height;
 
     // Sound: copy the recorded AAC straight across when every take has it (no re-encoding, works on older iPhones);
@@ -1499,7 +1544,7 @@ svg { display: block; }
 
     const muxer = new Mp4Muxer.Muxer({
       target: new Mp4Muxer.ArrayBufferTarget(),
-      video: { codec: 'avc', width: W, height: H, frameRate: fps },
+      video: { codec: muxCodec, width: W, height: H, frameRate: fps },
       audio: { codec: acfg && acfg.codec === 'opus' ? 'opus' : 'aac', numberOfChannels: ch, sampleRate: rate },
       fastStart: 'in-memory',
       firstTimestampBehavior: 'offset',
