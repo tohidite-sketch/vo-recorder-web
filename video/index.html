@@ -1536,7 +1536,9 @@ svg { display: block; }
         const cfg = Object.assign({ codec: k.codec, width: w, height: h, bitrate, framerate: fps }, k.extra);
         let ok = false;
         try { ok = (await VideoEncoder.isConfigSupported(cfg)).supported; } catch (err) {}
-        if (ok && await probeEncoder(cfg)) { cfg.mux = k.mux; return cfg; }
+        const proved = ok ? await probeEncoder(cfg) : false;
+        jlog('encoder ' + k.codec + (k.extra.avc || k.extra.hevc ? '' : ' (default format)') + ' ' + w + 'x' + h + ' @' + Math.round(bitrate / 1e6) + 'M: ' + (!ok ? 'not supported' : proved ? 'OK' : 'test frame failed'));
+        if (proved) { cfg.mux = k.mux; return cfg; }
       }
     }
     return null;
@@ -1605,6 +1607,9 @@ svg { display: block; }
     return null;
   }
 
+  let joinLog = [];
+  const jlog = (line) => { joinLog.push(((performance.now() / 1000).toFixed(1)) + 's ' + line); };
+
   const describe = (e) => {
     if (!e) return 'unknown error';
     const name = e.name && e.name !== 'Error' ? e.name + ': ' : '';
@@ -1632,6 +1637,9 @@ svg { display: block; }
       el.joinText.textContent = 'Reading take ' + (i + 1) + ' of ' + clips.length + '…';
       const p = await demux(await clips[i].blob.arrayBuffer());
       p.useDecoder = opts.forcePlayer ? false : await probeDecoder(p);
+      jlog('take ' + (i + 1) + ': ' + p.codec + ' ' + p.track.video.width + 'x' + p.track.video.height + ', ' + p.samples.length + ' frames, rot ' + p.rot +
+        ', sound ' + (p.aac ? 'AAC ' + p.aac.rate + 'Hz x' + p.aac.ch : 'not AAC') + ', decoder ' + (opts.forcePlayer ? 'skipped' : p.useDecoder ? 'OK' : 'refused') +
+        ', trim ' + rangeSec(clips[i]).map((x) => x.toFixed(2)).join('-') + 's');
       parsed.push(p);
     }
 
@@ -1679,6 +1687,7 @@ svg { display: block; }
     };
     const recover = async () => {
       rebuilds++;
+      jlog('encoder lost at frame ' + tick + ': ' + describe(failure) + ' (rebuild ' + rebuilds + ')');
       if (rebuilds > 4) throw new Error('the encoder kept failing: ' + describe(failure));
       try { venc.close(); } catch (e) {}
       failure = null;
@@ -1694,6 +1703,7 @@ svg { display: block; }
     g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
     const totalTicks = Math.max(1, Math.round(total * fps));
     let tick = 0, lastKey = -1e9;
+    jlog('joining at ' + W + 'x' + H + ' ' + vcfg.codec + ' ' + Math.round(vcfg.bitrate / 1e6) + 'M, ' + fps + ' fps, sound ' + (copySound ? 'copied' : acfg.codec));
     const tickTime = () => tick / fps;
     const emit = async () => {
       if (failure || venc.state !== 'configured') await recover();
@@ -1852,6 +1862,12 @@ svg { display: block; }
     // The camera is switched off while joining: it frees the phone's video hardware
     if (stream) { stopCamera(); el.camOff.hidden = false; el.flipBtn.hidden = true; }
     let blob = null, why = '';
+    joinLog = [];
+    el.joinSave.textContent = 'Save video';
+    el.joinSave.dataset.mode = 'save';
+    jlog('browser: ' + navigator.userAgent);
+    jlog('tools: VideoEncoder ' + !!window.VideoEncoder + ', VideoDecoder ' + !!window.VideoDecoder + ', AudioEncoder ' + !!window.AudioEncoder +
+      ', frame callback ' + ('requestVideoFrameCallback' in HTMLVideoElement.prototype) + '; settings ' + JSON.stringify(settings));
     if (canJoinExact()) {
       // Frame-by-frame join; if it fails, try again with safer settings before giving up on it
       const attempts = [{}, { forcePlayer: true, maxLong: 1920, maxBits: 12000000 }, { forcePlayer: true, maxLong: 1280, maxBits: 8000000 }];
@@ -1862,24 +1878,16 @@ svg { display: block; }
           el.joinText.textContent = 'That did not work (' + reasons[a - 1] + '). Trying again with safer settings…';
           await sleep(1200);
         }
+        jlog('--- try ' + (a + 1) + ' ' + JSON.stringify(attempts[a]));
         try { blob = await joinExact(attempts[a]); }
-        catch (err) { if (!joinCancelled) reasons.push((err && err.message) || String(err)); }
+        catch (err) { if (!joinCancelled) { reasons.push((err && err.message) || String(err)); jlog('FAILED: ' + reasons[reasons.length - 1]); } }
       }
       why = reasons.map((r, i) => 'try ' + (i + 1) + ': ' + r).join('; ');
     } else {
       why = 'this browser is missing the frame-by-frame video tools; updating iOS adds them';
     }
     if (joinCancelled) { finishJoin(null, ''); return; }
-    if (!blob) {
-      el.joinBar.style.width = '0%';
-      el.joinText.textContent = 'Using the slower live method because ' + why + '. Keep this screen open.';
-      blob = await joinRealtime();
-      if (joinCancelled) { finishJoin(null, ''); return; }
-      if (!blob) { finishJoin(null, 'Joining is not supported in this browser.'); return; }
-      finishJoin(blob, '');
-      el.joinText.textContent += ' Made with the slower live method because ' + why + ', so it may not be smooth.';
-      return;
-    }
+    if (!blob) { joinFailed(why); return; }
     finishJoin(blob, '');
   }
 
@@ -1965,6 +1973,19 @@ svg { display: block; }
     return new Blob(parts, { type: out.mimeType || type || 'video/mp4' });
   }
 
+  // No fallback that would give a choppy or out-of-sync video: explain, and offer a report to send
+  function joinFailed(why) {
+    joining = false;
+    el.joinBar.style.width = '0%';
+    el.joinTitle.textContent = 'Could not join perfectly';
+    el.joinText.textContent = 'No video was made, so you do not get a choppy or out-of-sync file. ' +
+      'Tap Copy report and send it so this can be fixed. Your takes are safe; the ↓ on each take saves it as recorded. (' + why + ')';
+    el.joinSave.textContent = 'Copy report';
+    el.joinSave.dataset.mode = 'report';
+    el.joinSave.hidden = false;
+    el.joinClose.textContent = 'Close';
+  }
+
   function finishJoin(blob, error) {
     joining = false;
     if (!blob) {
@@ -1984,7 +2005,16 @@ svg { display: block; }
   }
 
   el.join.addEventListener('click', () => { if (!edit) joinAll(); });
-  el.joinSave.addEventListener('click', () => {
+  el.joinSave.addEventListener('click', async () => {
+    if (el.joinSave.dataset.mode === 'report') {
+      const text = 'VO Camera join report\n' + joinLog.join('\n');
+      try { await navigator.clipboard.writeText(text); el.joinSave.textContent = 'Copied ✓ paste it in your chat'; }
+      catch (err) {
+        try { if (navigator.share) { await navigator.share({ text }); return; } } catch (e) {}
+        el.joinText.textContent = text;
+      }
+      return;
+    }
     if (!joined) return;
     const d = new Date();
     const stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes());
