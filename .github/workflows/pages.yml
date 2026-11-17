@@ -27,6 +27,7 @@ jobs:
         run: |
           mkdir -p site
           cp index.html manifest.webmanifest site/
+          cp -r video site/
           pip install --quiet pillow
           python3 - <<'PY'
           from PIL import Image, ImageDraw
