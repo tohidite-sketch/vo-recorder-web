@@ -100,6 +100,10 @@ svg { display: block; }
   font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .vf-info:empty { display: none; }
+.viewfinder { cursor: pointer; }
+.opt-sheet { max-height: 88vh; overflow-y: auto; }
+.opt-group { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; }
+.sheet p.opt-hint { margin: 0; font-size: 0.8125rem; }
 .rec-badge {
   position: absolute; left: 12px; top: 12px;
   display: flex; align-items: center; gap: 8px;
@@ -391,6 +395,25 @@ svg { display: block; }
   </div>
 </div>
 
+<div class="backdrop" id="optBack" hidden>
+  <div class="sheet opt-sheet" role="dialog" aria-modal="true" aria-labelledby="optTitle" aria-describedby="optNow">
+    <div class="grabber" aria-hidden="true"></div>
+    <h2 id="optTitle">Video options</h2>
+    <p id="optNow"></p>
+    <div class="opt-group"><span class="label">Camera</span><div class="chips" id="optCam"></div></div>
+    <div class="opt-group"><span class="label">Resolution</span><div class="chips" id="optRes"></div></div>
+    <div class="opt-group">
+      <span class="label">Frame rate</span><div class="chips" id="optFps"></div>
+      <p class="opt-hint">Lights in India run at 50 Hz. If you see flicker or bands under tube lights or LEDs, use 25 or 50 fps.</p>
+    </div>
+    <div class="opt-group">
+      <span class="label">Bitrate</span><div class="chips" id="optBit"></div>
+      <p class="opt-hint">Higher keeps more detail but makes bigger files.</p>
+    </div>
+    <div class="sheet-actions"><button id="optDone" class="btn-primary" type="button">Done</button></div>
+  </div>
+</div>
+
 <div class="edit-back" id="editBack" hidden>
   <div class="editor" id="editor" role="dialog" aria-modal="true" aria-labelledby="editTitle">
     <div class="editor-head">
@@ -431,7 +454,8 @@ svg { display: block; }
   'use strict';
   const $ = (id) => document.getElementById(id);
   const el = {
-    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'),
+    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'), viewfinder: document.querySelector('.viewfinder'),
+    optBack: $('optBack'), optNow: $('optNow'), optCam: $('optCam'), optRes: $('optRes'), optFps: $('optFps'), optBit: $('optBit'), optDone: $('optDone'),
     recBadge: $('recBadge'), badgeTime: $('badgeTime'),
     meter: $('meter'), timer: $('timer'), rec: $('rec'),
     status: $('status'), statusBtn: $('statusBtn'),
@@ -562,18 +586,30 @@ svg { display: block; }
     return out;
   }
 
-  // Load a video element and wait until it can show frames
+  // Load a video element and wait until it can show frames.
+  // iPhone only decodes a picture once a video has played, so it is kept in the page, played for a moment and paused.
   function loadVideo(url) {
     return new Promise((resolve) => {
       const v = document.createElement('video');
-      v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.preload = 'auto';
+      v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('muted', ''); v.preload = 'auto';
+      v.style.cssText = 'position:fixed;left:-20px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;';
+      document.body.appendChild(v);
       let done = false;
       const finish = () => { if (!done) { done = true; resolve(v); } };
-      v.addEventListener('loadeddata', finish, { once: true });
-      setTimeout(finish, 4000);
+      v.addEventListener('loadedmetadata', async () => {
+        try { await v.play(); v.pause(); } catch (err) {}
+        if (v.readyState >= 2) finish();
+        else v.addEventListener('loadeddata', finish, { once: true });
+      }, { once: true });
+      setTimeout(finish, 5000);
       v.src = url;
       v.load();
     });
+  }
+  function dropVideo(v) {
+    if (!v) return;
+    try { v.pause(); } catch (err) {}
+    v.removeAttribute('src'); v.load(); v.remove();
   }
   function seekTo(v, t) {
     return new Promise((resolve) => {
@@ -620,7 +656,7 @@ svg { display: block; }
       drawCover(cv.getContext('2d'), v, 192, 192);
       c.thumb = cv.toDataURL('image/jpeg', 0.72);
       c.thumbKey = key;
-      v.removeAttribute('src'); v.load();
+      dropVideo(v);
       const li = el.list.querySelector('[data-id="' + c.id + '"]');
       if (li) li.style.backgroundImage = 'url(' + c.thumb + ')';
     } catch (err) {}
@@ -629,11 +665,31 @@ svg { display: block; }
   /* ---------- camera ---------- */
   const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 
-  // Bitrate that keeps detail at whatever size the camera gives
-  const bitsFor = (w, h) => Math.round(Math.min(40000000, Math.max(6000000, w * h * 4.5)));
+  // Video options: picked in the sheet that opens when you tap the picture
+  const RES = [
+    { id: '720', label: '720p', s: 720, l: 1280 },
+    { id: '1080', label: '1080p', s: 1080, l: 1920 },
+    { id: 'wide', label: '4:3 wide', s: 1440, l: 1920 },
+    { id: '4k', label: '4K', s: 2160, l: 3840 },
+    { id: 'max', label: '4:3 max', s: 3024, l: 4032 },
+  ];
+  const FPS = [24, 25, 30, 50, 60];
+  const BITS = [
+    { id: 'std', label: '6 Mbps', bps: 6000000 },
+    { id: 'high', label: '12 Mbps', bps: 12000000 },
+    { id: 'vhigh', label: '20 Mbps', bps: 20000000 },
+    { id: 'max', label: '35 Mbps', bps: 35000000 },
+  ];
+  const settings = { res: '1080', fps: 30, bits: 'high' };
+  try { Object.assign(settings, JSON.parse(localStorage.getItem('vc-settings') || '{}')); } catch (err) {}
+  const resById = (id) => RES.find((r) => r.id === id) || RES[1];
+  const bitsNow = () => (BITS.find((b) => b.id === settings.bits) || BITS[1]).bps;
+  const saveSettings = () => { try { localStorage.setItem('vc-settings', JSON.stringify(settings)); } catch (err) {} };
+  let activeRes = null, lensesListed = false, starting = false;
 
   // The physical back lenses, widest first (iPhone names them Ultra Wide, Wide, Telephoto)
   async function listLenses() {
+    lensesListed = true;
     try {
       const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput' && d.label);
       const back = cams.filter((d) => /back|rear|environment/i.test(d.label));
@@ -646,25 +702,43 @@ svg { display: block; }
     } catch (err) { lenses = []; }
   }
 
-  // Ask for the biggest frame the camera has, in its own shape: nothing is cropped to fit a screen
-  function videoConstraints(maxSide) {
-    const v = { width: { ideal: maxSide }, height: { ideal: maxSide }, frameRate: { ideal: 30 } };
+  // The size is asked in the phone's own orientation, so a portrait phone gets a portrait video
+  function videoConstraints(res) {
+    const v = {};
+    if (res) {
+      const portrait = window.innerHeight >= window.innerWidth;
+      v.width = { ideal: portrait ? res.s : res.l };
+      v.height = { ideal: portrait ? res.l : res.s };
+    }
+    v.frameRate = { ideal: settings.fps };
     if (facing === 'environment' && lenses[lensIndex]) v.deviceId = { exact: lenses[lensIndex].id };
     else v.facingMode = facing;
     return v;
   }
+  const AUDIO = { echoCancellation: false, noiseSuppression: true, autoGainControl: true };
 
-  async function openStream(maxSide) {
-    return navigator.mediaDevices.getUserMedia({
-      video: videoConstraints(maxSide),
-      audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
+  // True once real frames are arriving in the viewfinder
+  function framesFlowing(ms) {
+    return new Promise((resolve) => {
+      const v = el.live, t0 = performance.now(), start = v.currentTime;
+      let done = false;
+      const ok = () => { if (!done) { done = true; resolve(true); } };
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => { if (v.videoWidth) ok(); });
+      const poll = () => {
+        if (done) return;
+        if (v.videoWidth && v.currentTime > start) { ok(); return; }
+        if (performance.now() - t0 > ms) { done = true; resolve(false); return; }
+        setTimeout(poll, 100);
+      };
+      poll();
     });
   }
 
   async function widest(track) {
     try {
       const caps = track.getCapabilities ? track.getCapabilities() : {};
-      if (caps.zoom && caps.zoom.min != null) await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+      const now = track.getSettings ? track.getSettings().zoom : null;
+      if (caps.zoom && now != null && caps.zoom.min < now) await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
     } catch (err) {}
   }
 
@@ -672,11 +746,10 @@ svg { display: block; }
     const t = stream && stream.getVideoTracks()[0];
     if (!t) { el.vfInfo.textContent = ''; return; }
     const s = t.getSettings ? t.getSettings() : {};
-    let w = s.width || el.live.videoWidth, h = s.height || el.live.videoHeight;
-    if (el.live.videoWidth && el.live.videoHeight) { w = el.live.videoWidth; h = el.live.videoHeight; }
+    const w = el.live.videoWidth || s.width, h = el.live.videoHeight || s.height;
     const fps = s.frameRate ? ' · ' + Math.round(s.frameRate) + ' fps' : '';
     const lens = facing === 'environment' && lenses[lensIndex] ? ' · ' + lenses[lensIndex].name : '';
-    el.vfInfo.textContent = w && h ? w + '×' + h + fps + lens : '';
+    el.vfInfo.textContent = w && h ? '⚙︎ ' + w + '×' + h + fps + lens : '';
   }
 
   function showLensBtn() {
@@ -688,50 +761,66 @@ svg { display: block; }
     }
   }
 
+  // Start the camera at the chosen size; if the phone shows no picture at that size, step down until it does
   async function startCamera() {
     if (!canRecord) { setMode('phone'); return; }
+    if (starting) return;
+    starting = true;
     stopCamera();
-    try {
-      try { stream = await openStream(4096); }
-      catch (err) {
-        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) throw err;
-        lenses = []; // a stale lens id, or a size the camera refuses: try the plain camera
-        stream = await openStream(1920);
+    setStatus('Starting the camera…');
+    const chosen = resById(settings.res);
+    const ladder = [chosen].concat(RES.filter((r) => r.s * r.l < chosen.s * chosen.l).sort((a, b) => b.s * b.l - a.s * a.l), [null]);
+    let lastErr = null, used;
+    for (const res of ladder) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(res), audio: AUDIO });
+      } catch (err) {
+        lastErr = err; stream = null;
+        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'NotFoundError')) break;
+        if (lenses.length) { lenses = []; lensIndex = 0; }
+        continue;
       }
-    } catch (err) {
+      el.live.srcObject = stream;
+      el.live.classList.toggle('mirror', facing === 'user');
+      try { await el.live.play(); } catch (err) {}
+      if (await framesFlowing(3500)) { used = res; break; }
+      stream.getTracks().forEach((t) => t.stop());
       stream = null;
+      el.live.srcObject = null;
+    }
+    starting = false;
+    if (!stream) {
       el.camOff.hidden = false;
-      setStatus(err && err.name === 'NotFoundError'
+      setStatus(lastErr && lastErr.name === 'NotFoundError'
         ? 'No camera was found on this device.'
-        : 'The camera or microphone is blocked. Allow both when asked, or use the phone camera.', true);
+        : lastErr && (lastErr.name === 'NotAllowedError' || lastErr.name === 'SecurityError')
+          ? 'The camera or microphone is blocked. Allow both for Safari in Settings, then reload.'
+          : 'The camera did not show a picture. Close other apps using the camera and try again.', true);
       return;
     }
-    // Lens names are only readable after permission: on the first run, reopen on the widest back lens
-    if (facing === 'environment' && !lenses.length) {
+    // Lens names can only be read once permission is given: list them, then reopen on the widest back lens
+    if (!lensesListed) {
       await listLenses();
       const cur = stream.getVideoTracks()[0].getSettings().deviceId;
-      if (lenses.length && lenses[0].id !== cur) {
-        stream.getTracks().forEach((t) => t.stop());
-        try { stream = await openStream(4096); } catch (err) { lenses = []; stream = await openStream(1920); }
-      }
+      if (facing === 'environment' && lenses.length && lenses[lensIndex].id !== cur) return startCamera();
     }
-    const track = stream.getVideoTracks()[0];
-    await widest(track);
-    el.live.srcObject = stream;
-    el.live.classList.toggle('mirror', facing === 'user');
+    activeRes = used ? used.id : null;
+    await widest(stream.getVideoTracks()[0]);
     el.live.onloadedmetadata = showInfo;
     el.live.onresize = showInfo;
-    el.live.play().catch(() => {});
     el.camOff.hidden = true;
     el.flipBtn.hidden = false;
-    setStatus('');
     showInfo();
     showLensBtn();
+    const mic = stream.getAudioTracks()[0];
+    if (!mic || mic.readyState !== 'live') setStatus('The microphone is not available, so takes would be silent. Allow the microphone for Safari in Settings.');
+    else if (activeRes !== settings.res) setStatus('This camera could not show ' + chosen.label + ' here, so it is using ' + (used ? used.label : 'its own default size') + '.');
+    else setStatus('');
     const c = audioCtx();
     analyser = c.createAnalyser();
     analyser.fftSize = 1024;
     levelData = new Float32Array(analyser.fftSize);
-    if (stream.getAudioTracks().length) { micSource = c.createMediaStreamSource(stream); micSource.connect(analyser); }
+    if (mic) { micSource = c.createMediaStreamSource(stream); micSource.connect(analyser); }
   }
 
   function stopCamera() {
@@ -765,6 +854,58 @@ svg { display: block; }
     startCamera();
   });
 
+  /* ---------- video options ---------- */
+  const chipsHtml = (items, key, cur) => items.map((it) =>
+    '<button type="button" class="chip' + (String(it.v) === String(cur) ? ' on' : '') + '" data-k="' + key + '" data-v="' + it.v + '">' + it.t + '</button>').join('');
+
+  function renderOptions() {
+    const cams = [{ v: 'front', t: 'Front' }].concat(lenses.length
+      ? lenses.map((l, i) => ({ v: 'back' + i, t: 'Back ' + l.name }))
+      : [{ v: 'back0', t: 'Back' }]);
+    el.optCam.innerHTML = chipsHtml(cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
+    el.optRes.innerHTML = chipsHtml(RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
+    el.optFps.innerHTML = chipsHtml(FPS.map((f) => ({ v: f, t: f + ' fps' })), 'fps', settings.fps);
+    el.optBit.innerHTML = chipsHtml(BITS.map((b) => ({ v: b.id, t: b.label })), 'bits', settings.bits);
+    const now = el.vfInfo.textContent.replace(/^\S+ /, '');
+    el.optNow.textContent = !stream ? 'Turn on the camera to see what it gives.'
+      : 'The camera is giving ' + now + '.' + (activeRes !== settings.res ? ' It could not do ' + resById(settings.res).label + ' here.' : '');
+  }
+
+  function openOptions() {
+    if (recording || busy || joining || edit) return;
+    renderOptions();
+    el.optBack.hidden = false;
+    el.optDone.focus({ preventScroll: true });
+  }
+  const closeOptions = () => { el.optBack.hidden = true; };
+
+  el.viewfinder.addEventListener('click', (e) => {
+    if (e.target.closest('button') || !stream) return;
+    openOptions();
+  });
+  el.optDone.addEventListener('click', closeOptions);
+  el.optBack.addEventListener('click', async (e) => {
+    if (e.target === el.optBack) { closeOptions(); return; }
+    const b = e.target.closest('[data-k]');
+    if (!b || starting) return;
+    const k = b.dataset.k, v = b.dataset.v;
+    if (k === 'res') settings.res = v;
+    else if (k === 'fps') settings.fps = Number(v);
+    else if (k === 'bits') settings.bits = v;
+    else if (k === 'cam') {
+      if (v === 'front') facing = 'user';
+      else { facing = 'environment'; lensIndex = Number(v.slice(4)) || 0; }
+      try { localStorage.setItem('vc-facing', facing); } catch (err) {}
+    }
+    saveSettings();
+    renderOptions();
+    if (k !== 'bits' && stream) {
+      el.optNow.textContent = 'Applying…';
+      await startCamera();
+      renderOptions();
+    }
+  });
+
   /* ---------- recording ---------- */
   async function onRecTap() {
     if (busy || joining) return;
@@ -773,28 +914,17 @@ svg { display: block; }
     audioCtx();
     if (!stream) { await startCamera(); if (!stream) return; }
     const type = pickType(VIDEO_TYPES);
-    const begin = () => {
-      const w = el.live.videoWidth || 1920, h = el.live.videoHeight || 1080;
-      const r = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: bitsFor(w, h), audioBitsPerSecond: 192000 } : undefined);
-      r.start(1000);
-      return r;
-    };
+    // No timeslice: iPhone builds a cleaner file when it is handed over in one piece at the end
+    const make = (opts) => { const r = new MediaRecorder(stream, opts); r.start(); return r; };
     try {
-      recorder = begin();
+      recorder = make(type ? { mimeType: type, videoBitsPerSecond: bitsNow(), audioBitsPerSecond: 192000 } : { videoBitsPerSecond: bitsNow() });
     } catch (err) {
-      // Some phones cannot encode their largest frame: step down once and try again
-      try {
-        await stream.getVideoTracks()[0].applyConstraints(Object.assign(videoConstraints(1920), { deviceId: undefined, facingMode: undefined }));
-        await sleep(300);
-        showInfo();
-        recorder = begin();
-      } catch (err2) {
-        setStatus('Recording could not start here.', true);
-        return;
-      }
+      try { recorder = make(undefined); }
+      catch (err2) { setStatus('Recording could not start here.', true); return; }
     }
     chunks = [];
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.onerror = (e) => setStatus('Recording hit an error (' + ((e && e.error && e.error.name) || 'unknown') + '). Try a lower resolution in video options.');
     recorder.onstop = () => addClip(new Blob(chunks, { type: recorder.mimeType || type || 'video/mp4' }));
     recording = true;
     recStart = performance.now();
@@ -805,7 +935,8 @@ svg { display: block; }
     el.flipBtn.hidden = true;
     el.lensBtn.hidden = true;
     el.newBtn.disabled = true;
-    setStatus('');
+    const mic = stream.getAudioTracks()[0];
+    setStatus(!mic || mic.readyState !== 'live' || mic.muted ? 'No sound is coming from the microphone, so this take may be silent.' : '');
     if (navigator.wakeLock) navigator.wakeLock.request('screen').then((w) => { wake = w; }).catch(() => {});
   }
 
@@ -834,6 +965,11 @@ svg { display: block; }
     busy = true;
     el.rec.classList.add('busy');
     setStatus('Saving take…');
+    if (!blob || !blob.size) {
+      setStatus('Nothing was recorded. Try again; if it keeps happening, pick a lower resolution in video options (tap the picture).');
+      finishBusy();
+      return;
+    }
     try {
       const url = URL.createObjectURL(blob);
       let audio = null;
@@ -842,7 +978,7 @@ svg { display: block; }
         audio = await new Promise((res, rej) => audioCtx().decodeAudioData(buf, res, rej));
       } catch (err) { audio = null; }
       let dur = audio ? audio.duration : 0;
-      if (!dur) { const v = await loadVideo(url); dur = await realDuration(v); }
+      if (!dur) { const v = await loadVideo(url); dur = await realDuration(v); dropVideo(v); }
       if (dur < 0.4) { URL.revokeObjectURL(url); setStatus('That one was too short to keep.'); finishBusy(); return; }
       const clip = { id: nextId++, blob, url, type: blob.type, dur, hue: HUES[hueIndex++ % HUES.length], manual: null, thumb: null, thumbKey: -1 };
       if (audio) {
@@ -861,7 +997,9 @@ svg { display: block; }
       unsaved = true;
       freshId = clip.id;
       const cut = (clip.len - (clip.autoE - clip.autoS)) / clip.rate;
-      setStatus(!isNatural() && cut >= 0.1
+      setStatus(!clip.audio
+        ? 'Take ' + clips.length + ' saved, but its sound could not be read. Check that the microphone is allowed.'
+        : !isNatural() && cut >= 0.1
         ? 'Take ' + clips.length + ': ' + cut.toFixed(1) + ' s of silence will be trimmed. Tap it to adjust.'
         : '');
       render();
@@ -1001,8 +1139,14 @@ svg { display: block; }
     edit = { clip, s: r[0], e: r[1], useAuto: !clip.manual, tile, drag: null, playing: false };
     el.editor.style.setProperty('--h', clip.hue);
     el.editTitle.textContent = 'Take ' + pad(clips.indexOf(clip) + 1);
+    el.editVideo.poster = clip.thumb || '';
+    el.editVideo.muted = true;
+    el.editVideo.onloadedmetadata = () => {
+      const v = el.editVideo;
+      v.play().then(() => { v.pause(); if (edit) showFrame(edit.s / edit.clip.rate); }).catch(() => {});
+    };
     el.editVideo.src = clip.url;
-    el.editVideo.muted = false;
+    el.editVideo.load();
     el.editBack.hidden = false;
     const s = getComputedStyle(el.editor);
     edit.colors = {
@@ -1055,7 +1199,8 @@ svg { display: block; }
     setTimeout(() => {
       el.editBack.hidden = true;
       el.editor.style.transition = ''; el.editor.style.transform = ''; el.editor.style.opacity = '';
-      el.editVideo.pause(); el.editVideo.removeAttribute('src'); el.editVideo.load();
+      el.editVideo.onloadedmetadata = null;
+      el.editVideo.pause(); el.editVideo.removeAttribute('src'); el.editVideo.removeAttribute('poster'); el.editVideo.load();
       if (message) { render(); setStatus(message); makeThumb(clip); }
     }, REDUCE_MOTION ? 0 : 290);
   }
@@ -1158,6 +1303,7 @@ svg { display: block; }
     if (!edit) return;
     if (edit.playing) { stopPreview(); return; }
     const c = edit.clip, v = el.editVideo, end = edit.e / c.rate;
+    v.muted = false;
     try { v.currentTime = edit.s / c.rate; } catch (err) {}
     v.play().then(() => {
       edit.playing = true;
@@ -1195,19 +1341,19 @@ svg { display: block; }
     let W = first.videoWidth || 1080, H = first.videoHeight || 1920;
     const scale = Math.min(1, Math.sqrt(8294400 / (W * H)));   // keeps full size up to 4K worth of pixels
     W = Math.round(W * scale / 2) * 2; H = Math.round(H * scale / 2) * 2;
-    first.removeAttribute('src'); first.load();
+    dropVideo(first);
 
     const canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
     const g = canvas.getContext('2d');
     g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
     const dest = ac.createMediaStreamDestination();
-    const vTrack = canvas.captureStream(30).getVideoTracks()[0];
+    const vTrack = canvas.captureStream(settings.fps).getVideoTracks()[0];
     const mixed = new MediaStream([vTrack].concat(dest.stream.getAudioTracks()));
     const type = pickType(VIDEO_TYPES);
     let out;
     try {
-      out = new MediaRecorder(mixed, type ? { mimeType: type, videoBitsPerSecond: bitsFor(W, H), audioBitsPerSecond: 192000 } : undefined);
+      out = new MediaRecorder(mixed, type ? { mimeType: type, videoBitsPerSecond: bitsNow(), audioBitsPerSecond: 192000 } : undefined);
     } catch (err) {
       finishJoin(null, 'Joining is not supported in this browser.');
       return;
@@ -1228,7 +1374,7 @@ svg { display: block; }
     current = await next;
     drawContain(g, current, W, H);
     raf = requestAnimationFrame(paint);
-    out.start(1000);
+    out.start();
 
     for (let i = 0; i < clips.length && !joinCancelled; i++) {
       const c = clips[i];
@@ -1257,15 +1403,17 @@ svg { display: block; }
         progress(Math.min(length, t - r[0]));
         if (t >= r[1] || v.ended || performance.now() - t0 > (length + 3) * 1000) break;
       }
-      v.pause();
       if (src) { try { src.stop(); } catch (err) {} }
       done += length;
+      if (i + 1 < clips.length) { const keep = v; setTimeout(() => dropVideo(keep), 400); } else v.pause();
     }
+    if (next) next.then(dropVideo);
     await sleep(200);
     out.stop();
     await stopped;
     cancelAnimationFrame(raf);
     vTrack.stop();
+    if (current) dropVideo(current);
     if (joinCancelled) { finishJoin(null, ''); return; }
     finishJoin(new Blob(parts, { type: out.mimeType || type || 'video/mp4' }), '');
   }
@@ -1369,10 +1517,11 @@ svg { display: block; }
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (edit) closeEditor(false);
+      else if (!el.optBack.hidden) closeOptions();
       else if (!el.sheetBack.hidden) el.sheetBack.hidden = true;
       return;
     }
-    if (e.code !== 'Space' || edit || joining || !el.sheetBack.hidden) return;
+    if (e.code !== 'Space' || edit || joining || !el.sheetBack.hidden || !el.optBack.hidden) return;
     const tag = e.target && e.target.tagName;
     if (tag === 'BUTTON' || tag === 'INPUT') return;
     e.preventDefault();
