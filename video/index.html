@@ -72,7 +72,7 @@ svg { display: block; }
   background: #000;
   box-shadow: var(--shadow);
 }
-#live { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+#live { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
 #live.mirror { transform: scaleX(-1); }
 .cam-off {
   position: absolute; inset: 0;
@@ -92,6 +92,14 @@ svg { display: block; }
 .vf-btn[hidden] { display: none; }
 .vf-btn svg { width: 22px; height: 22px; }
 #flipBtn { right: 12px; }
+#lensBtn { right: 64px; width: auto; min-width: 44px; padding: 0 12px; border-radius: 22px; font-weight: 700; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+.vf-info {
+  position: absolute; left: 12px; bottom: 12px;
+  padding: 5px 10px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5); color: #fff;
+  font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.vf-info:empty { display: none; }
 .rec-badge {
   position: absolute; left: 12px; top: 12px;
   display: flex; align-items: center; gap: 8px;
@@ -314,6 +322,8 @@ svg { display: block; }
         <button id="startCam" type="button">Turn on camera</button>
       </div>
       <div class="rec-badge" id="recBadge" hidden><i></i><span id="badgeTime">0:00</span></div>
+      <span class="vf-info" id="vfInfo"></span>
+      <button class="vf-btn" id="lensBtn" type="button" aria-label="Switch lens" hidden>1×</button>
       <button class="vf-btn" id="flipBtn" type="button" aria-label="Switch between front and back camera" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></svg>
       </button>
@@ -421,7 +431,7 @@ svg { display: block; }
   'use strict';
   const $ = (id) => document.getElementById(id);
   const el = {
-    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'),
+    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'),
     recBadge: $('recBadge'), badgeTime: $('badgeTime'),
     meter: $('meter'), timer: $('timer'), rec: $('rec'),
     status: $('status'), statusBtn: $('statusBtn'),
@@ -455,6 +465,8 @@ svg { display: block; }
 
   let mode = 'camera';
   let ctx = null, stream = null, analyser = null, levelData = null, facing = 'user';
+  let lenses = [], lensIndex = 0, micSource = null;
+  try { if (localStorage.getItem('vc-facing') === 'environment') facing = 'environment'; } catch (err) {}
   let recorder = null, chunks = [];
   let recording = false, busy = false, recStart = 0, wake = null;
   const clips = [];
@@ -581,6 +593,15 @@ svg { display: block; }
     return isFinite(d) ? d : 0;
   }
 
+  // Whole frame, letterboxed if a take has a different shape: never cropped
+  function drawContain(g, v, W, H) {
+    const vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh) return;
+    const s = Math.min(W / vw, H / vh), dw = vw * s, dh = vh * s;
+    if (Math.abs(dw - W) > 1 || Math.abs(dh - H) > 1) { g.fillStyle = '#000'; g.fillRect(0, 0, W, H); }
+    g.drawImage(v, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  }
+
   function drawCover(g, v, W, H) {
     const vw = v.videoWidth, vh = v.videoHeight;
     if (!vw || !vh) return;
@@ -608,14 +629,75 @@ svg { display: block; }
   /* ---------- camera ---------- */
   const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 
+  // Bitrate that keeps detail at whatever size the camera gives
+  const bitsFor = (w, h) => Math.round(Math.min(40000000, Math.max(6000000, w * h * 4.5)));
+
+  // The physical back lenses, widest first (iPhone names them Ultra Wide, Wide, Telephoto)
+  async function listLenses() {
+    try {
+      const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput' && d.label);
+      const back = cams.filter((d) => /back|rear|environment/i.test(d.label));
+      const single = back.filter((d) => !/dual|triple/i.test(d.label));
+      const rank = (l) => (/ultra/i.test(l) ? 0 : /tele/i.test(l) ? 2 : 1);
+      lenses = (single.length ? single : back)
+        .map((d) => ({ id: d.deviceId, label: d.label, rank: rank(d.label) }))
+        .sort((x, y) => x.rank - y.rank);
+      lenses.forEach((l, i) => { l.name = l.rank === 0 ? '0.5×' : l.rank === 2 ? 'Tele' : (lenses.length > 1 && !/wide/i.test(l.label) ? 'Lens ' + (i + 1) : '1×'); });
+    } catch (err) { lenses = []; }
+  }
+
+  // Ask for the biggest frame the camera has, in its own shape: nothing is cropped to fit a screen
+  function videoConstraints(maxSide) {
+    const v = { width: { ideal: maxSide }, height: { ideal: maxSide }, frameRate: { ideal: 30 } };
+    if (facing === 'environment' && lenses[lensIndex]) v.deviceId = { exact: lenses[lensIndex].id };
+    else v.facingMode = facing;
+    return v;
+  }
+
+  async function openStream(maxSide) {
+    return navigator.mediaDevices.getUserMedia({
+      video: videoConstraints(maxSide),
+      audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
+    });
+  }
+
+  async function widest(track) {
+    try {
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.zoom && caps.zoom.min != null) await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+    } catch (err) {}
+  }
+
+  function showInfo() {
+    const t = stream && stream.getVideoTracks()[0];
+    if (!t) { el.vfInfo.textContent = ''; return; }
+    const s = t.getSettings ? t.getSettings() : {};
+    let w = s.width || el.live.videoWidth, h = s.height || el.live.videoHeight;
+    if (el.live.videoWidth && el.live.videoHeight) { w = el.live.videoWidth; h = el.live.videoHeight; }
+    const fps = s.frameRate ? ' · ' + Math.round(s.frameRate) + ' fps' : '';
+    const lens = facing === 'environment' && lenses[lensIndex] ? ' · ' + lenses[lensIndex].name : '';
+    el.vfInfo.textContent = w && h ? w + '×' + h + fps + lens : '';
+  }
+
+  function showLensBtn() {
+    const many = facing === 'environment' && lenses.length > 1 && !!stream;
+    el.lensBtn.hidden = !many || recording;
+    if (many) {
+      el.lensBtn.textContent = lenses[lensIndex].name;
+      el.lensBtn.setAttribute('aria-label', 'Lens: ' + lenses[lensIndex].label + '. Tap to switch.');
+    }
+  }
+
   async function startCamera() {
     if (!canRecord) { setMode('phone'); return; }
     stopCamera();
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1080 }, height: { ideal: 1920 }, frameRate: { ideal: 30 } },
-        audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
-      });
+      try { stream = await openStream(4096); }
+      catch (err) {
+        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) throw err;
+        lenses = []; // a stale lens id, or a size the camera refuses: try the plain camera
+        stream = await openStream(1920);
+      }
     } catch (err) {
       stream = null;
       el.camOff.hidden = false;
@@ -624,23 +706,41 @@ svg { display: block; }
         : 'The camera or microphone is blocked. Allow both when asked, or use the phone camera.', true);
       return;
     }
+    // Lens names are only readable after permission: on the first run, reopen on the widest back lens
+    if (facing === 'environment' && !lenses.length) {
+      await listLenses();
+      const cur = stream.getVideoTracks()[0].getSettings().deviceId;
+      if (lenses.length && lenses[0].id !== cur) {
+        stream.getTracks().forEach((t) => t.stop());
+        try { stream = await openStream(4096); } catch (err) { lenses = []; stream = await openStream(1920); }
+      }
+    }
+    const track = stream.getVideoTracks()[0];
+    await widest(track);
     el.live.srcObject = stream;
     el.live.classList.toggle('mirror', facing === 'user');
+    el.live.onloadedmetadata = showInfo;
+    el.live.onresize = showInfo;
     el.live.play().catch(() => {});
     el.camOff.hidden = true;
     el.flipBtn.hidden = false;
     setStatus('');
+    showInfo();
+    showLensBtn();
     const c = audioCtx();
     analyser = c.createAnalyser();
     analyser.fftSize = 1024;
     levelData = new Float32Array(analyser.fftSize);
-    if (stream.getAudioTracks().length) c.createMediaStreamSource(stream).connect(analyser);
+    if (stream.getAudioTracks().length) { micSource = c.createMediaStreamSource(stream); micSource.connect(analyser); }
   }
 
   function stopCamera() {
     if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (micSource) { try { micSource.disconnect(); } catch (err) {} micSource = null; }
     stream = null; analyser = null;
     el.live.srcObject = null;
+    el.vfInfo.textContent = '';
+    el.lensBtn.hidden = true;
   }
 
   function setMode(m) {
@@ -655,6 +755,13 @@ svg { display: block; }
   el.flipBtn.addEventListener('click', () => {
     if (recording || busy) return;
     facing = facing === 'user' ? 'environment' : 'user';
+    lensIndex = 0;
+    try { localStorage.setItem('vc-facing', facing); } catch (err) {}
+    startCamera();
+  });
+  el.lensBtn.addEventListener('click', () => {
+    if (recording || busy || lenses.length < 2) return;
+    lensIndex = (lensIndex + 1) % lenses.length;
     startCamera();
   });
 
@@ -666,16 +773,29 @@ svg { display: block; }
     audioCtx();
     if (!stream) { await startCamera(); if (!stream) return; }
     const type = pickType(VIDEO_TYPES);
+    const begin = () => {
+      const w = el.live.videoWidth || 1920, h = el.live.videoHeight || 1080;
+      const r = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: bitsFor(w, h), audioBitsPerSecond: 192000 } : undefined);
+      r.start(1000);
+      return r;
+    };
     try {
-      recorder = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 5000000, audioBitsPerSecond: 160000 } : undefined);
+      recorder = begin();
     } catch (err) {
-      setStatus('Recording could not start here.', true);
-      return;
+      // Some phones cannot encode their largest frame: step down once and try again
+      try {
+        await stream.getVideoTracks()[0].applyConstraints(Object.assign(videoConstraints(1920), { deviceId: undefined, facingMode: undefined }));
+        await sleep(300);
+        showInfo();
+        recorder = begin();
+      } catch (err2) {
+        setStatus('Recording could not start here.', true);
+        return;
+      }
     }
     chunks = [];
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     recorder.onstop = () => addClip(new Blob(chunks, { type: recorder.mimeType || type || 'video/mp4' }));
-    recorder.start(1000);
     recording = true;
     recStart = performance.now();
     el.rec.classList.add('on');
@@ -683,6 +803,7 @@ svg { display: block; }
     el.timer.classList.add('on');
     el.recBadge.hidden = false;
     el.flipBtn.hidden = true;
+    el.lensBtn.hidden = true;
     el.newBtn.disabled = true;
     setStatus('');
     if (navigator.wakeLock) navigator.wakeLock.request('screen').then((w) => { wake = w; }).catch(() => {});
@@ -705,6 +826,7 @@ svg { display: block; }
     el.newBtn.disabled = false;
     el.rec.classList.remove('busy');
     el.flipBtn.hidden = !stream;
+    showLensBtn();
     el.timer.textContent = '00:00.0';
   }
 
@@ -1071,7 +1193,7 @@ svg { display: block; }
     const ac = audioCtx();
     const first = await loadVideo(clips[0].url);
     let W = first.videoWidth || 1080, H = first.videoHeight || 1920;
-    const scale = Math.min(1, 1920 / Math.max(W, H));
+    const scale = Math.min(1, Math.sqrt(8294400 / (W * H)));   // keeps full size up to 4K worth of pixels
     W = Math.round(W * scale / 2) * 2; H = Math.round(H * scale / 2) * 2;
     first.removeAttribute('src'); first.load();
 
@@ -1085,7 +1207,7 @@ svg { display: block; }
     const type = pickType(VIDEO_TYPES);
     let out;
     try {
-      out = new MediaRecorder(mixed, type ? { mimeType: type, videoBitsPerSecond: 6000000, audioBitsPerSecond: 160000 } : undefined);
+      out = new MediaRecorder(mixed, type ? { mimeType: type, videoBitsPerSecond: bitsFor(W, H), audioBitsPerSecond: 192000 } : undefined);
     } catch (err) {
       finishJoin(null, 'Joining is not supported in this browser.');
       return;
@@ -1095,7 +1217,7 @@ svg { display: block; }
     const stopped = new Promise((r) => { out.onstop = r; });
 
     let current = null, raf = 0;
-    const paint = () => { if (current) drawCover(g, current, W, H); raf = requestAnimationFrame(paint); };
+    const paint = () => { if (current) drawContain(g, current, W, H); raf = requestAnimationFrame(paint); };
 
     const total = joinedSeconds();
     let done = 0;
@@ -1104,7 +1226,7 @@ svg { display: block; }
     const prepare = async (c) => { const v = await loadVideo(c.url); await seekTo(v, rangeSec(c)[0]); return v; };
     let next = prepare(clips[0]);
     current = await next;
-    drawCover(g, current, W, H);
+    drawContain(g, current, W, H);
     raf = requestAnimationFrame(paint);
     out.start(1000);
 
