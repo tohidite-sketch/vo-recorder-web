@@ -1484,15 +1484,71 @@ svg { display: block; }
       { codec: 'hvc1.1.6.L153.B0', mux: 'hevc', extra: { hevc: { format: 'hevc' } } },
       { codec: 'avc1.640033', mux: 'avc', extra: {} },
     ];
+    const rates = [bitsNow(), 20000000, 12000000, 8000000].filter((b, i, a) => b <= a[0] && a.indexOf(b) === i);
     for (const [w, h] of sizes) {
-      for (const k of kinds) {
-        const cfg = Object.assign({ codec: k.codec, width: w, height: h, bitrate: bitsNow(), framerate: fps }, k.extra);
+      for (const k of kinds) for (const bitrate of rates) {
+        const cfg = Object.assign({ codec: k.codec, width: w, height: h, bitrate, framerate: fps }, k.extra);
         let ok = false;
         try { ok = (await VideoEncoder.isConfigSupported(cfg)).supported; } catch (err) {}
         if (ok && await probeEncoder(cfg)) { cfg.mux = k.mux; return cfg; }
       }
     }
     return null;
+  }
+
+  const toChunk = (s) => new EncodedVideoChunk({
+    type: s.is_sync ? 'key' : 'delta',
+    timestamp: Math.round(s.cts * 1e6 / s.timescale),
+    duration: Math.round(s.duration * 1e6 / s.timescale),
+    data: s.data,
+  });
+  const decoderConfig = (p) => ({ codec: p.codec, codedWidth: p.track.video.width, codedHeight: p.track.video.height, description: p.description });
+
+  // Can this phone's decoder really read this take? (very large frames are refused on some iPhones)
+  async function probeDecoder(p) {
+    const cfg = decoderConfig(p);
+    try { if (!(await VideoDecoder.isConfigSupported(cfg)).supported) return false; } catch (err) { return false; }
+    return new Promise((resolve) => {
+      let frames = 0, bad = false, dec = null, settled = false;
+      const fin = (v) => { if (settled) return; settled = true; clearTimeout(timer); try { dec.close(); } catch (e) {} resolve(v); };
+      const timer = setTimeout(() => fin(false), 6000);
+      try {
+        dec = new VideoDecoder({ output: (f) => { frames++; f.close(); }, error: () => { bad = true; } });
+        dec.configure(cfg);
+        for (const s of p.samples.slice(0, 10)) dec.decode(toChunk(s));
+        dec.flush().then(() => fin(frames > 0 && !bad), () => fin(false));
+      } catch (err) { fin(false); }
+    });
+  }
+
+  // Second way to read frames: let the phone's own video player decode the take, and copy each frame it shows
+  // with its exact time. Playback pauses whenever the encoder falls behind, so no frame is skipped.
+  async function feedFromPlayer(c, r, shift, handle) {
+    if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) throw new Error('this browser cannot read frames from its player');
+    const v = await loadVideo(c.url);
+    await seekTo(v, Math.max(0, r[0] - 0.12));
+    const queue = [];
+    let finished = false, lastFrameAt = performance.now();
+    const onFrame = (now, md) => {
+      if (finished) return;
+      lastFrameAt = performance.now();
+      const t = md.mediaTime;
+      try { queue.push(new VideoFrame(v, { timestamp: Math.round((t + shift) * 1e6) })); } catch (err) {}
+      if (t >= r[1] || v.ended) { finished = true; v.pause(); return; }
+      if (queue.length >= 3) v.pause();
+      v.requestVideoFrameCallback(onFrame);
+    };
+    v.requestVideoFrameCallback(onFrame);
+    try { await v.play(); } catch (err) { dropVideo(v); throw new Error('the phone would not play a take to read it'); }
+    while (!finished || queue.length) {
+      if (queue.length) { await handle(queue.shift(), 0); continue; }
+      if (v.ended) finished = true;
+      if (!finished && v.paused) { lastFrameAt = performance.now(); v.play().catch(() => {}); }
+      if (!finished && performance.now() - lastFrameAt > 4000) finished = true;   // stuck: keep what we have
+      if (joinCancelled) { finished = true; queue.forEach((f) => f.close()); queue.length = 0; }
+      await sleep(4);
+    }
+    dropVideo(v);
   }
 
   async function pickAudioConfig(rate, ch) {
@@ -1512,7 +1568,9 @@ svg { display: block; }
     for (let i = 0; i < clips.length; i++) {
       if (joinCancelled) throw new Error('cancelled');
       el.joinText.textContent = 'Reading take ' + (i + 1) + ' of ' + clips.length + '…';
-      parsed.push(await demux(await clips[i].blob.arrayBuffer()));
+      const p = await demux(await clips[i].blob.arrayBuffer());
+      p.useDecoder = await probeDecoder(p);
+      parsed.push(p);
     }
 
     // The first take sets the size; any other shape is fitted inside it with black bars, never cropped
@@ -1587,36 +1645,36 @@ svg { display: block; }
       }
       el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + '…';
       const end = off + len;
-      const queue = [];
-      let decFail = null;
-      const dec = new VideoDecoder({ output: (f) => queue.push(f), error: (e) => { decFail = e; } });
-      dec.configure({ codec: p.codec, codedWidth: p.track.video.width, codedHeight: p.track.video.height, description: p.description });
       const shift = p.vEdit + p.audioStart;   // take time 0 is where its sound starts
-      const handle = async (f) => {
+      const handle = async (f, rot) => {
         const o = off + (f.timestamp / 1e6 - shift - r[0]);
         if (o < end) {
           while (tickTime() < o - 1e-6 && tickTime() < end - 1e-6) { emit(); await settle(); }
-          drawFrame(g, f, p.rot, W, H);
+          drawFrame(g, f, rot, W, H);
         }
         f.close();
       };
-      const drain = async () => { while (queue.length) await handle(queue.shift()); };
-      for (const s of p.samples) {
-        if (decFail) throw decFail;
-        dec.decode(new EncodedVideoChunk({
-          type: s.is_sync ? 'key' : 'delta',
-          timestamp: Math.round(s.cts * 1e6 / s.timescale),
-          duration: Math.round(s.duration * 1e6 / s.timescale),
-          data: s.data,
-        }));
-        while (dec.decodeQueueSize > 4 || queue.length > 2) { await drain(); if (dec.decodeQueueSize > 4) await sleep(2); }
+      if (p.useDecoder) {
+        const queue = [];
+        let decFail = null;
+        const dec = new VideoDecoder({ output: (f) => queue.push(f), error: (e) => { decFail = e; } });
+        dec.configure(decoderConfig(p));
+        const drain = async () => { while (queue.length) await handle(queue.shift(), p.rot); };
+        for (const s of p.samples) {
+          if (decFail) throw decFail;
+          dec.decode(toChunk(s));
+          while (dec.decodeQueueSize > 4 || queue.length > 2) { await drain(); if (dec.decodeQueueSize > 4) await sleep(2); }
+          await drain();
+          if (s.cts / s.timescale - shift > r[1] + 0.5) break;   // well past the trimmed end
+        }
+        await dec.flush().catch(() => {});
         await drain();
-        if (s.cts / s.timescale - shift > r[1] + 0.5) break;   // well past the trimmed end
+        dec.close();
+        if (decFail) throw decFail;
+      } else {
+        el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + ' (large video, read through the player)…';
+        await feedFromPlayer(c, r, shift, handle);
       }
-      await dec.flush().catch(() => {});
-      await drain();
-      dec.close();
-      if (decFail) throw decFail;
       while (tickTime() < end - 1e-6) { emit(); await settle(); }
       off = end;
       p.samples.length = 0;
