@@ -1340,40 +1340,43 @@ svg { display: block; }
 
   /* Exact join: every frame is decoded and re-encoded in order, not in real time.
      The picture is resampled to a steady frame rate on the same timeline as the sound, so they cannot drift. */
-  const LIBS = [
-    'https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js',
-    'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js',
-  ];
-  let libsReady = null;
+  // mp4box 2.x reads iPhone recordings correctly (0.5.x misplaced their frames)
+  const MP4BOX_URL = 'https://cdn.jsdelivr.net/npm/mp4box@2.5.0/dist/mp4box.all.mjs';
+  const MUXER_URL = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js';
+  let libsReady = null, MP4 = null;
   function loadLibs() {
     if (!libsReady) {
-      libsReady = Promise.all(LIBS.map((src) => new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('the video tools could not be downloaded'));
-        document.head.appendChild(s);
-      }))).catch((err) => { libsReady = null; throw err; });
+      const fail = () => new Error('the video tools could not be downloaded (check the internet connection)');
+      libsReady = Promise.all([
+        import(MP4BOX_URL).then((m) => { MP4 = m; }, () => { throw fail(); }),
+        window.Mp4Muxer ? Promise.resolve() : new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = MUXER_URL; s.onload = resolve; s.onerror = () => reject(fail());
+          document.head.appendChild(s);
+        }),
+      ]).catch((err) => { libsReady = null; throw err; });
     }
     return libsReady;
   }
-  const canJoinExact = () => !!(window.VideoDecoder && window.VideoEncoder && window.AudioEncoder && window.VideoFrame && window.AudioData);
+  const canJoinExact = () => !!(window.VideoDecoder && window.VideoEncoder && window.VideoFrame && window.EncodedVideoChunk);
 
   // Read the frames of one take without playing it
   function demux(buf) {
     return new Promise((resolve, reject) => {
-      const file = MP4Box.createFile();
+      const file = MP4.createFile();
       let vt = null, at = null, firstAudio = null, failed = false;
-      const samples = [];
+      const samples = [], aSamples = [];
       file.onError = (e) => { failed = true; reject(new Error('a take could not be read (' + e + ')')); };
       file.onReady = (info) => {
         vt = info.videoTracks[0]; at = info.audioTracks[0];
         if (!vt) return;
         file.setExtractionOptions(vt.id, 'v', { nbSamples: 500 });
-        if (at) file.setExtractionOptions(at.id, 'a', { nbSamples: 1 });
+        if (at) file.setExtractionOptions(at.id, 'a', { nbSamples: 500 });
         file.start();
       };
       file.onSamples = (id, user, list) => {
         if (user === 'v') { for (const s of list) samples.push(s); }
-        else if (firstAudio == null && list.length) firstAudio = list[0];
+        else { for (const s of list) aSamples.push(s); if (firstAudio == null && list.length) firstAudio = list[0]; }
       };
       buf.fileStart = 0;
       file.appendBuffer(buf);
@@ -1385,7 +1388,7 @@ svg { display: block; }
       for (const entry of trak.mdia.minf.stbl.stsd.entries) {
         const box = entry.avcC || entry.hvcC;
         if (box) {
-          const ds = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+          const ds = new MP4.DataStream(undefined, 0, MP4.Endianness.BIG_ENDIAN);
           box.write(ds);
           description = new Uint8Array(ds.buffer, 8);
           break;
@@ -1410,8 +1413,18 @@ svg { display: block; }
         } catch (err) { return 0; }
       };
       const vEdit = editStart(vt.id);
-      const aPres0 = firstAudio ? firstAudio.cts / firstAudio.timescale - editStart(at.id) : 0;
-      resolve({ track: vt, codec, samples, description, rot, vEdit, audioStart: Math.max(0, aPres0) });
+      const aEdit = at ? editStart(at.id) : 0;
+      const aPres0 = firstAudio ? firstAudio.cts / firstAudio.timescale - aEdit : 0;
+      // The sound as recorded (AAC on iPhone) so it can be copied across without re-encoding
+      let asc = null;
+      if (at && /^mp4a\.40\.2/.test(at.codec)) {
+        try { asc = new Uint8Array(file.getTrackById(at.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data); } catch (err) { asc = null; }
+      }
+      aSamples.sort((a, b) => a.dts - b.dts);
+      resolve({
+        track: vt, codec, samples, description, rot, vEdit, audioStart: Math.max(0, aPres0),
+        aac: asc ? { asc, rate: at.audio.sample_rate, ch: at.audio.channel_count, samples: aSamples, edit: aEdit, pres0: aPres0 } : null,
+      });
     });
   }
 
@@ -1470,16 +1483,24 @@ svg { display: block; }
     if (!vcfg) throw new Error('this phone cannot make an H.264 video at this size');
     W = vcfg.width; H = vcfg.height;
 
+    // Sound: copy the recorded AAC straight across when every take has it (no re-encoding, works on older iPhones);
+    // otherwise encode it, which needs iOS 26 or a recent desktop browser
+    const a0 = parsed[0].aac;
+    const copySound = !!a0 && parsed.every((p) => p.aac && p.aac.rate === a0.rate && p.aac.ch === a0.ch && p.aac.asc.join() === a0.asc.join());
     const withSound = clips.find((c) => c.audio);
-    const rate = withSound ? withSound.audio.sampleRate : 48000;
-    const ch = withSound ? Math.min(2, withSound.audio.numberOfChannels) : 2;
-    const acfg = await pickAudioConfig(rate, ch);
-    if (!acfg) throw new Error('this phone cannot encode the sound here');
+    let rate, ch, acfg = null;
+    if (copySound) { rate = a0.rate; ch = a0.ch; }
+    else {
+      rate = withSound ? withSound.audio.sampleRate : 48000;
+      ch = withSound ? Math.min(2, withSound.audio.numberOfChannels) : 2;
+      if (window.AudioEncoder && window.AudioData) acfg = await pickAudioConfig(rate, ch);
+      if (!acfg) throw new Error('the takes have no sound this phone can copy, and it cannot encode sound here');
+    }
 
     const muxer = new Mp4Muxer.Muxer({
       target: new Mp4Muxer.ArrayBufferTarget(),
       video: { codec: 'avc', width: W, height: H, frameRate: fps },
-      audio: { codec: acfg.codec === 'opus' ? 'opus' : 'aac', numberOfChannels: ch, sampleRate: rate },
+      audio: { codec: acfg && acfg.codec === 'opus' ? 'opus' : 'aac', numberOfChannels: ch, sampleRate: rate },
       fastStart: 'in-memory',
       firstTimestampBehavior: 'offset',
     });
@@ -1559,8 +1580,38 @@ svg { display: block; }
     await venc.flush();
     venc.close();
 
-    // Sound: the same cuts and pauses, sample-exact, with tiny fades so cuts do not click
     el.joinText.textContent = 'Adding the sound…';
+    if (copySound) {
+      // Each AAC frame is 1024 samples; frames are laid end to end on the same timeline as the picture,
+      // with silent frames for the pauses
+      const fdur = 1024 / rate;
+      const silent = new Uint8Array(ch === 1 ? [0x00, 0xc8, 0x00, 0x80, 0x23, 0x80] : [0x21, 0x00, 0x49, 0x90, 0x02, 0x19, 0x00, 0x23, 0x80]);
+      const meta = { decoderConfig: { codec: 'mp4a.40.2', sampleRate: rate, numberOfChannels: ch, description: a0.asc } };
+      let cursor = 0, first = true;
+      const put = (data) => {
+        muxer.addAudioChunkRaw(data, 'key', Math.round(cursor * 1e6), Math.round(fdur * 1e6), first ? meta : undefined);
+        first = false;
+        cursor += fdur;
+      };
+      let at = 0;
+      clips.forEach((c, i) => {
+        if (i > 0) at += insertBetween(clips[i - 1], c);
+        const r = rangeSec(c), len = r[1] - r[0], a = parsed[i].aac;
+        while (cursor < at - fdur / 2) put(silent);
+        for (const s of a.samples) {
+          const t = s.cts / s.timescale - a.edit - a.pres0;
+          if (t >= r[0] - fdur / 2 && t < r[1] - fdur / 2) put(s.data);
+        }
+        at += len;
+        a.samples.length = 0;
+      });
+      while (cursor < total - fdur / 2) put(silent);
+      muxer.finalize();
+      el.joinBar.style.width = '100%';
+      return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    }
+
+    // Sound: the same cuts and pauses, sample-exact, with tiny fades so cuts do not click
     const N = Math.max(1, Math.round(total * rate));
     const outs = [];
     for (let k = 0; k < ch; k++) outs.push(new Float32Array(N));
@@ -1627,6 +1678,9 @@ svg { display: block; }
       blob = await joinRealtime();
       if (joinCancelled) { finishJoin(null, ''); return; }
       if (!blob) { finishJoin(null, 'Joining is not supported in this browser.'); return; }
+      finishJoin(blob, '');
+      el.joinText.textContent += ' Made with the slower live method because ' + why + ', so it may not be smooth.';
+      return;
     }
     finishJoin(blob, '');
   }
@@ -1635,7 +1689,7 @@ svg { display: block; }
     const ac = audioCtx();
     const first = await loadVideo(clips[0].url);
     let W = first.videoWidth || 1080, H = first.videoHeight || 1920;
-    const scale = Math.min(1, Math.sqrt(8294400 / (W * H)));   // keeps full size up to 4K worth of pixels
+    const scale = Math.min(1, 1920 / Math.max(W, H));   // the live method drops frames at bigger sizes
     W = Math.round(W * scale / 2) * 2; H = Math.round(H * scale / 2) * 2;
     dropVideo(first);
 
