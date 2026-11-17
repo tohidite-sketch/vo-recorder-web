@@ -401,7 +401,10 @@ svg { display: block; }
     <h2 id="optTitle">Video options</h2>
     <p id="optNow"></p>
     <div class="opt-group"><span class="label">Camera</span><div class="chips" id="optCam"></div></div>
-    <div class="opt-group"><span class="label">Resolution</span><div class="chips" id="optRes"></div></div>
+    <div class="opt-group">
+      <span class="label">Resolution</span><div class="chips" id="optRes"></div>
+      <p class="opt-hint">Every size shows the camera's full view. A lower size only uses fewer pixels, and is quicker to join.</p>
+    </div>
     <div class="opt-group">
       <span class="label">Frame rate</span><div class="chips" id="optFps"></div>
       <p class="opt-hint">Lights in India run at 50 Hz. If you see flicker or bands under tube lights or LEDs, use 25 or 50 fps.</p>
@@ -666,13 +669,16 @@ svg { display: block; }
   const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
 
   // Video options: picked in the sheet that opens when you tap the picture
+  // Every size keeps the camera's full view (its whole sensor shape); a lower size only means fewer pixels.
+  // 'short' is the length of the shorter side; 0 means the camera's own maximum.
   const RES = [
-    { id: '720', label: '720p', s: 720, l: 1280 },
-    { id: '1080', label: '1080p', s: 1080, l: 1920 },
-    { id: 'wide', label: '4:3 wide', s: 1440, l: 1920 },
-    { id: '4k', label: '4K', s: 2160, l: 3840 },
-    { id: 'max', label: '4:3 max', s: 3024, l: 4032 },
+    { id: '720', label: '720p', short: 720 },
+    { id: '1080', label: '1080p', short: 1080 },
+    { id: '1440', label: '1440p', short: 1440 },
+    { id: '4k', label: '4K', short: 2160 },
+    { id: 'max', label: 'Max', short: 0 },
   ];
+  const resSize = (r) => r.short || 1e9;
   const FPS = [24, 25, 30, 50, 60];
   const BITS = [
     { id: 'std', label: '6 Mbps', bps: 6000000 },
@@ -703,12 +709,50 @@ svg { display: block; }
   }
 
   // The size is asked in the phone's own orientation, so a portrait phone gets a portrait video
+  // The full-sensor shape of each camera, learned once from what the camera says it can do
+  const nativeShape = {};
+  try { Object.assign(nativeShape, JSON.parse(localStorage.getItem('vc-native2') || '{}')); } catch (err) {}
+  const camKey = () => (facing === 'environment' ? 'back:' + (lenses[lensIndex] ? lenses[lensIndex].label : '') : 'front');
+
+  async function learnNative() {
+    const key = camKey();
+    if (nativeShape[key]) return;
+    let shape = null;
+    try {
+      const v = videoConstraints(null);
+      v.width = { ideal: 4096 }; v.height = { ideal: 4096 };
+      const probe = await navigator.mediaDevices.getUserMedia({ video: v });
+      const t = probe.getVideoTracks()[0];
+      const caps = t.getCapabilities ? t.getCapabilities() : {};
+      const st = t.getSettings ? t.getSettings() : {};
+      // The biggest frame the camera gives is its whole sensor; keep its shape and which way round it comes
+      let a = st.width, b = st.height;
+      if (!a || !b) { a = caps.width && caps.width.max; b = caps.height && caps.height.max; }
+      probe.getTracks().forEach((x) => x.stop());
+      if (a && b) {
+        const screenPortrait = window.innerHeight >= window.innerWidth;
+        shape = { long: Math.max(a, b), short: Math.min(a, b), matchesScreen: (b >= a) === screenPortrait };
+      }
+    } catch (err) {}
+    if (shape) {
+      nativeShape[key] = shape;
+      try { localStorage.setItem('vc-native2', JSON.stringify(nativeShape)); } catch (err) {}
+    }
+  }
+
+  // Ask for the camera's full-sensor shape, scaled to the chosen size, in the phone's orientation
   function videoConstraints(res) {
     const v = {};
     if (res) {
-      const portrait = window.innerHeight >= window.innerWidth;
-      v.width = { ideal: portrait ? res.s : res.l };
-      v.height = { ideal: portrait ? res.l : res.s };
+      const screenPortrait = window.innerHeight >= window.innerWidth;
+      const nat = nativeShape[camKey()] || { long: 4032, short: 3024, matchesScreen: true };
+      // ask the same way round the camera delivers, so it never has to crop to turn the picture
+      const portrait = nat.matchesScreen ? screenPortrait : !screenPortrait;
+      const k = res.short ? Math.min(1, res.short / nat.short) : 1;
+      const s = Math.round(nat.short * k / 2) * 2, l = Math.round(nat.long * k / 2) * 2;
+      v.width = { ideal: portrait ? s : l };
+      v.height = { ideal: portrait ? l : s };
+      v.aspectRatio = { ideal: portrait ? s / l : l / s };
     }
     v.frameRate = { ideal: settings.fps };
     if (facing === 'environment' && lenses[lensIndex]) v.deviceId = { exact: lenses[lensIndex].id };
@@ -768,8 +812,9 @@ svg { display: block; }
     starting = true;
     stopCamera();
     setStatus('Starting the camera…');
+    await learnNative();
     const chosen = resById(settings.res);
-    const ladder = [chosen].concat(RES.filter((r) => r.s * r.l < chosen.s * chosen.l).sort((a, b) => b.s * b.l - a.s * a.l), [null]);
+    const ladder = [chosen].concat(RES.filter((r) => resSize(r) < resSize(chosen)).sort((a, b) => resSize(b) - resSize(a)), [null]);
     let lastErr = null, used;
     for (const res of ladder) {
       try {
