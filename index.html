@@ -196,11 +196,12 @@ svg { display: block; }
 .tile-wave i { flex: 1; border-radius: 2px; background: hsl(var(--h) 30% var(--bar-l) / 0.45); }
 .tile-wave i.on { background: var(--accent); }
 .tile-play {
-  position: absolute; left: 8px; bottom: 7px;
-  width: 26px; height: 26px; border-radius: 50%;
-  display: grid; place-items: center;
-  background: var(--surface); color: var(--accent);
+  position: absolute; left: 3px; bottom: 2px;
+  width: 36px; height: 36px; border-radius: 50%;
+  border: none; padding: 0; background: transparent;
+  display: grid; place-items: center; color: var(--accent);
 }
+.tile-play span { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--surface); }
 .tile-play svg { width: 12px; height: 12px; }
 .tile-x, .tile-save {
   position: absolute;
@@ -325,6 +326,51 @@ svg { display: block; }
 .btn-danger { background: color-mix(in srgb, var(--rec) 14%, var(--surface)); color: var(--rec); }
 .sheet-actions button[hidden] { display: none; }
 
+/* Trim editor: the take grows out of its tile over a blurred screen */
+.edit-back {
+  position: fixed; inset: 0; z-index: 20;
+  display: grid; place-items: center;
+  padding: calc(18px + env(safe-area-inset-top, 0px)) 16px calc(18px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--bg-deep) 35%, rgba(0, 0, 0, 0.28));
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  opacity: 0;
+  transition: opacity 0.28s ease;
+}
+.edit-back.show { opacity: 1; }
+.edit-back[hidden] { display: none; }
+.editor {
+  --h: 168;
+  width: 100%; max-width: 560px;
+  background: var(--surface);
+  border-radius: 28px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  transform-origin: top left;
+}
+.editor-head { background: hsl(var(--h) var(--tile-s) var(--tile-l)); padding: 18px 18px 14px; display: flex; flex-direction: column; gap: 12px; }
+.editor-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.editor-title strong { font-size: 1.125rem; font-weight: 700; letter-spacing: -0.01em; }
+#editLen { font-weight: 700; font-variant-numeric: tabular-nums; color: hsl(var(--h) 30% var(--bar-l)); }
+.wave-wrap { position: relative; height: 150px; border-radius: 16px; background: color-mix(in srgb, var(--surface) 55%, transparent); touch-action: none; cursor: ew-resize; }
+#editWave { width: 100%; height: 100%; display: block; }
+.editor-body { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 14px; }
+.edge-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
+.edge { display: flex; flex-direction: column; gap: 6px; }
+.edge.end { align-items: flex-end; }
+.edge-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.edge-time { font-weight: 700; font-size: 1.0625rem; font-variant-numeric: tabular-nums; }
+.nudge { display: flex; gap: 6px; }
+.nudge button { width: 42px; height: 36px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); font-weight: 700; font-size: 1.125rem; line-height: 1; }
+.nudge button:active { background: var(--soft); }
+#editPlay { width: 58px; height: 58px; border-radius: 50%; border: none; padding: 0; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; }
+#editPlay svg { width: 22px; height: 22px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { border: 1px solid var(--line); background: var(--soft); color: var(--ink); border-radius: 999px; padding: 8px 14px; font-weight: 600; font-size: 0.875rem; }
+.chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.editor-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.editor-foot button { border: none; border-radius: 16px; padding: 14px; font-weight: 600; font-size: 1rem; }
+
 /* While typing, the script gets the whole screen */
 body.editing .top,
 body.editing .strip,
@@ -419,6 +465,38 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   </div>
 </div>
 
+<div class="edit-back" id="editBack" hidden>
+  <div class="editor" id="editor" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+    <div class="editor-head">
+      <div class="editor-title"><strong id="editTitle">Take 01</strong><span id="editLen">0.00 s</span></div>
+      <div class="wave-wrap" id="waveWrap"><canvas id="editWave" role="img" aria-label="Waveform. Drag the handles to trim the start and end."></canvas></div>
+    </div>
+    <div class="editor-body">
+      <div class="edge-row">
+        <div class="edge">
+          <span class="edge-label">Start</span>
+          <span class="edge-time" id="editStart">0:00.00</span>
+          <div class="nudge"><button type="button" data-nudge="s-" aria-label="Start a little earlier">−</button><button type="button" data-nudge="s+" aria-label="Start a little later">+</button></div>
+        </div>
+        <button id="editPlay" type="button" aria-label="Play the trimmed take"></button>
+        <div class="edge end">
+          <span class="edge-label">End</span>
+          <span class="edge-time" id="editEnd">0:00.00</span>
+          <div class="nudge"><button type="button" data-nudge="e-" aria-label="End a little earlier">−</button><button type="button" data-nudge="e+" aria-label="End a little later">+</button></div>
+        </div>
+      </div>
+      <div class="chips">
+        <button class="chip" id="chipAuto" type="button">Auto trim</button>
+        <button class="chip" id="chipFull" type="button">Full take</button>
+      </div>
+      <div class="editor-foot">
+        <button class="btn-quiet" id="editCancel" type="button">Cancel</button>
+        <button class="btn-primary" id="editSave" type="button">Save trim</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <input type="file" id="capture" accept="audio/*" capture hidden>
 
 <script>
@@ -434,6 +512,10 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     ta: $('ta'), box: $('box'), done: $('done'), hint: $('hint'), sizePill: $('sizePill'),
     sheetBack: $('sheetBack'), sheetText: $('sheetText'),
     keepBtn: $('keepBtn'), clearBtn: $('clearBtn'), cancelBtn: $('cancelBtn'),
+    editBack: $('editBack'), editor: $('editor'), editTitle: $('editTitle'), editLen: $('editLen'),
+    waveWrap: $('waveWrap'), editWave: $('editWave'), editStart: $('editStart'), editEnd: $('editEnd'),
+    editPlay: $('editPlay'), chipAuto: $('chipAuto'), chipFull: $('chipFull'),
+    editCancel: $('editCancel'), editSave: $('editSave'),
   };
 
   const BARS = 22;
@@ -441,7 +523,10 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const HEAD_PAD = 0.08;               // seconds of quiet kept before the voice starts
   const TAIL_PAD = 0.2;                // seconds kept after it stops, so word endings ring out
-  const GAPS = [0.25, 0.5, 0.75, 1, 1.5];
+  const GAPS = ['natural', 0.25, 0.5, 0.75, 1, 1.5];   // 'natural' keeps every take exactly as recorded
+  const NUDGE = 0.05;                  // seconds per tap on the − / + buttons in the trim editor
+  const MIN_LEN = 0.2;                 // shortest a trimmed take can be
+  const REDUCE_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const ICON = {
     play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
     pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>',
@@ -458,7 +543,12 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   const clips = [];
   let nextId = 1, hueIndex = 0, unsaved = false, freshId = null;
   let gapSeconds = 0.5;
-  try { const g = parseFloat(localStorage.getItem('vo-gap')); if (GAPS.includes(g)) gapSeconds = g; } catch (err) {}
+  try {
+    const g = localStorage.getItem('vo-gap');
+    if (g === 'natural') gapSeconds = 'natural';
+    else if (GAPS.includes(parseFloat(g))) gapSeconds = parseFloat(g);
+  } catch (err) {}
+  const isNatural = () => gapSeconds === 'natural';
   const player = new Audio();
   let playingId = null;
   let trash = null, trashTimer = 0;
@@ -512,12 +602,14 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     return b;
   }
 
-  // Cut the dead air before the voice starts and after it ends.
+  // Find where the voice starts and ends, keeping a little quiet at each edge.
   // Works on 10 ms windows: the threshold sits a little above the room's noise floor.
-  function trimSilence(pcm, rate) {
+  // Returns [start, end] in samples; the whole take when nothing sounds like a voice.
+  function detectVoice(pcm, rate) {
+    const whole = [0, pcm.length];
     const win = Math.max(1, Math.round(rate * 0.01));
     const count = Math.floor(pcm.length / win);
-    if (count < 10) return pcm;
+    if (count < 10) return whole;
     const rms = new Float32Array(count);
     for (let w = 0; w < count; w++) {
       let sum = 0;
@@ -527,25 +619,47 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     const sorted = Array.from(rms).sort((a, b) => a - b);
     const floor = sorted[Math.floor(count * 0.1)];
     const peak = sorted[count - 1];
-    if (peak < 0.01) return pcm;                       // nothing that sounds like a voice
+    if (peak < 0.01) return whole;                     // nothing that sounds like a voice
     const thr = Math.min(Math.max(floor * 3, 0.004), peak * 0.15);
     const loud = (w) => rms[w] > thr && rms[w + 1] > thr && rms[w + 2] > thr;
     let first = -1, last = -1;
     for (let w = 0; w < count - 2; w++) if (loud(w)) { first = w; break; }
     for (let w = count - 3; w >= 0; w--) if (loud(w)) { last = w + 2; break; }
-    if (first < 0) return pcm;
-    const start = Math.max(0, first * win - Math.round(HEAD_PAD * rate));
-    const end = Math.min(pcm.length, (last + 1) * win + Math.round(TAIL_PAD * rate));
-    if (start === 0 && end === pcm.length) return pcm;
-    const out = pcm.slice(start, end);
-    // Short fades so the cut edges never click
+    if (first < 0) return whole;
+    return [
+      Math.max(0, first * win - Math.round(HEAD_PAD * rate)),
+      Math.min(pcm.length, (last + 1) * win + Math.round(TAIL_PAD * rate)),
+    ];
+  }
+
+  // Copy out [start, end) with short fades so the cut edges never click
+  function cutPcm(raw, start, end, rate) {
+    const out = raw.slice(start, end);
     const fade = Math.min(Math.round(rate * 0.012), Math.floor(out.length / 4));
     for (let i = 0; i < fade; i++) {
       const g = i / fade;
       if (start > 0) out[i] = Math.round(out[i] * g);
-      if (end < pcm.length) out[out.length - 1 - i] = Math.round(out[out.length - 1 - i] * g);
+      if (end < raw.length) out[out.length - 1 - i] = Math.round(out[out.length - 1 - i] * g);
     }
     return out;
+  }
+
+  // The part of a take in use: a hand trim wins; otherwise auto trim, or the whole take for natural gaps
+  const rangeOf = (c) => c.manual || (isNatural() ? [0, c.raw.length] : [c.autoS, c.autoE]);
+
+  // Build (or reuse) the trimmed audio, its waveform and length for the current range
+  function ensureCache(c) {
+    const r = rangeOf(c);
+    const key = r[0] + ':' + r[1];
+    if (c.key === key) return c;
+    const pcm = cutPcm(c.raw, r[0], r[1], c.rate);
+    if (c.url) URL.revokeObjectURL(c.url);
+    c.blob = new Blob([wavHeader(pcm.byteLength, c.rate), pcm.buffer], { type: 'audio/wav' });
+    c.url = URL.createObjectURL(c.blob);
+    c.peaks = peaksOf(pcm);
+    c.dur = pcm.length / c.rate;
+    c.key = key;
+    return c;
   }
 
   function peaksOf(pcm) {
@@ -711,19 +825,19 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
         setStatus('That one was too short to keep.');
       } else {
         const raw = toPcm16(audio);
-        const pcm = trimSilence(raw, audio.sampleRate);
-        const wav = new Blob([wavHeader(pcm.byteLength, audio.sampleRate), pcm.buffer], { type: 'audio/wav' });
+        const auto = detectVoice(raw, audio.sampleRate);
         const clip = {
-          id: nextId++, blob: wav, url: URL.createObjectURL(wav),
-          rate: audio.sampleRate, dur: pcm.length / audio.sampleRate, peaks: peaksOf(pcm),
-          cut: (raw.length - pcm.length) / audio.sampleRate,
-          hue: HUES[hueIndex++ % HUES.length],
+          id: nextId++, raw, rate: audio.sampleRate,
+          autoS: auto[0], autoE: auto[1], manual: null,
+          hue: HUES[hueIndex++ % HUES.length], key: null,
         };
+        ensureCache(clip);
         clips.push(clip);
         unsaved = true;
         freshId = clip.id;
-        setStatus(clip.cut >= 0.1
-          ? 'Take ' + clips.length + ': trimmed ' + clip.cut.toFixed(1) + ' s of silence.'
+        const cut = (raw.length - (auto[1] - auto[0])) / audio.sampleRate;
+        setStatus(!isNatural() && cut >= 0.1
+          ? 'Take ' + clips.length + ': trimmed ' + cut.toFixed(1) + ' s of silence. Tap it to adjust.'
           : (mode === 'mic' ? '' : el.status.textContent));
         render();
         el.list.scrollTo({ left: el.list.scrollWidth, behavior: 'smooth' });
@@ -742,21 +856,22 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     if (!clips.length) {
       el.list.innerHTML =
         '<li class="tile-ghost" aria-hidden="true">' + ICON.mic + '</li>' +
-        '<li class="ghost-text">Each take lands here as a square. Tap ✕ to drop one.</li>';
+        '<li class="ghost-text">Each take lands here. Tap one to trim it, ✕ to drop it.</li>';
     }
     clips.forEach((c, i) => {
+      ensureCache(c);
       const n = i + 1;
       const li = document.createElement('li');
       li.className = 'tile' + (c.id === freshId ? ' fresh' : '');
       li.dataset.id = c.id;
       li.style.setProperty('--h', c.hue);
       li.innerHTML =
-        '<button class="tile-main" type="button" data-act="play" aria-label="Play take ' + n + ', ' + clock(c.dur) + '">' +
+        '<button class="tile-main" type="button" data-act="edit" aria-label="Trim take ' + n + ', ' + clock(c.dur) + (c.manual ? ', trimmed by hand' : '') + '">' +
           '<span class="tile-num">' + pad(n) + '</span>' +
-          '<span class="tile-dur">' + Math.floor(c.dur / 60) + ':' + pad(Math.floor(c.dur % 60)) + '</span>' +
+          '<span class="tile-dur">' + (c.manual ? '✂ ' : '') + Math.floor(c.dur / 60) + ':' + pad(Math.floor(c.dur % 60)) + '</span>' +
           '<span class="tile-wave">' + c.peaks.map((p) => '<i style="height:' + Math.round(p * 100) + '%"></i>').join('') + '</span>' +
-          '<span class="tile-play">' + ICON.play + '</span>' +
         '</button>' +
+        '<button class="tile-play" type="button" data-act="play" aria-label="Play take ' + n + '"><span>' + ICON.play + '</span></button>' +
         '<button class="tile-save" type="button" data-act="save" aria-label="Download take ' + n + '">' + ICON.save + '</button>' +
         '<button class="tile-x" type="button" data-act="cut" aria-label="Discard take ' + n + '"><span>' + ICON.cut + '</span></button>';
       el.list.appendChild(li);
@@ -783,8 +898,9 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     const clip = li && clipById(Number(li.dataset.id));
     if (!clip) return;
     const act = target.dataset.act;
-    if (act === 'play') togglePlay(clip);
-    else if (act === 'save') saveBlob(clip.blob, 'take-' + (clips.indexOf(clip) + 1) + '.wav');
+    if (act === 'edit') openEditor(clip, li);
+    else if (act === 'play') togglePlay(clip);
+    else if (act === 'save') saveBlob(ensureCache(clip).blob, 'take-' + (clips.indexOf(clip) + 1) + '.wav');
     else if (act === 'cut') discard(clip);
   });
 
@@ -808,7 +924,7 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     el.list.querySelectorAll('.tile').forEach((li) => {
       const mine = Number(li.dataset.id) === playingId;
       li.classList.toggle('playing', mine);
-      li.querySelector('.tile-play').innerHTML = mine && !player.paused ? ICON.pause : ICON.play;
+      li.querySelector('.tile-play span').innerHTML = mine && !player.paused ? ICON.pause : ICON.play;
       if (!mine) li.querySelectorAll('.tile-wave i.on').forEach((b) => b.classList.remove('on'));
     });
     paintProgress();
@@ -857,18 +973,25 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   });
 
   /* ---------- export ---------- */
-  // The same pause between every take: the trimmed edges already hold HEAD_PAD + TAIL_PAD of quiet
-  const insertSeconds = () => Math.max(0, gapSeconds - HEAD_PAD - TAIL_PAD);
-  const joinedSeconds = () => clips.reduce((s, c) => s + c.dur, 0) + Math.max(0, clips.length - 1) * insertSeconds();
+  // Silence to add between two takes. Natural gaps add none: each take keeps its own recorded pauses.
+  // Auto-trimmed edges already hold HEAD_PAD / TAIL_PAD of quiet, so only the rest is added.
+  function insertBetween(a, b) {
+    if (isNatural()) return 0;
+    return Math.max(0, gapSeconds - (a.manual ? 0 : TAIL_PAD) - (b.manual ? 0 : HEAD_PAD));
+  }
+  const joinedSeconds = () => clips.reduce((s, c, i) => s + ensureCache(c).dur + (i > 0 ? insertBetween(clips[i - 1], c) : 0), 0);
 
   el.join.addEventListener('click', async () => {
     if (!clips.length) return;
     const rate = clips[0].rate;
-    const silence = new Int16Array(Math.round(insertSeconds() * rate));
     const parts = [];
     let bytes = 0;
     clips.forEach((c, i) => {
-      if (i > 0 && silence.length) { parts.push(silence.buffer.slice(0)); bytes += silence.byteLength; }
+      ensureCache(c);
+      if (i > 0) {
+        const n = Math.round(insertBetween(clips[i - 1], c) * rate);
+        if (n > 0) { const z = new Int16Array(n); parts.push(z.buffer); bytes += z.byteLength; }
+      }
       parts.push(c.blob.slice(44));
       bytes += c.blob.size - 44;
     });
@@ -879,18 +1002,240 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   });
 
   function showGap() {
-    const label = String(gapSeconds).replace(/^0\./, '0.');
-    el.gapBtn.textContent = 'Gap ' + label + ' s';
-    el.gapBtn.setAttribute('aria-label', 'Pause between takes when joined: ' + label + ' seconds. Tap to change.');
+    if (isNatural()) {
+      el.gapBtn.textContent = 'Natural gap';
+      el.gapBtn.setAttribute('aria-label', 'Gap between takes: natural, kept as recorded. Tap to change.');
+    } else {
+      el.gapBtn.textContent = 'Gap ' + gapSeconds + ' s';
+      el.gapBtn.setAttribute('aria-label', 'Pause between takes when joined: ' + gapSeconds + ' seconds. Tap to change.');
+    }
   }
   el.gapBtn.addEventListener('click', () => {
+    stopPlayback();
     gapSeconds = GAPS[(GAPS.indexOf(gapSeconds) + 1) % GAPS.length];
     try { localStorage.setItem('vo-gap', String(gapSeconds)); } catch (err) {}
     showGap();
     render();
-    setStatus('Join all will leave ' + gapSeconds + ' s between takes.');
+    setStatus(isNatural()
+      ? 'Natural gap: takes keep the silence you recorded. Only your own trims are applied.'
+      : 'Join all will leave ' + gapSeconds + ' s between takes.');
   });
   showGap();
+
+  /* ---------- trim editor ---------- */
+  const EDGE = 18;                      // px kept free at each side so the handles are easy to grab
+  const editAudio = new Audio();
+  let edit = null, editUrl = null;
+
+  const fmtTime = (sec) => {
+    const m = Math.floor(sec / 60), s = sec - m * 60;
+    return m + ':' + (s < 10 ? '0' : '') + s.toFixed(2);
+  };
+
+  function openEditor(clip, tile) {
+    if (recording || busy || edit) return;
+    stopPlayback();
+    const r = rangeOf(clip);
+    edit = { clip, s: r[0], e: r[1], useAuto: !clip.manual, tile, drag: null, peaks: null, colors: null };
+    el.editor.style.setProperty('--h', clip.hue);
+    el.editTitle.textContent = 'Take ' + pad(clips.indexOf(clip) + 1);
+    el.editBack.hidden = false;
+    const s = getComputedStyle(el.editor);
+    edit.colors = {
+      accent: s.getPropertyValue('--accent').trim(),
+      rec: s.getPropertyValue('--rec').trim(),
+      ink: s.getPropertyValue('--ink').trim(),
+      bar: 'hsl(' + clip.hue + ', 30%, ' + s.getPropertyValue('--bar-l').trim() + ')',
+    };
+    sizeWave();
+    refreshEdit();
+    // Grow the card out of the tile that was tapped
+    if (!REDUCE_MOTION && tile) {
+      const from = tile.getBoundingClientRect(), to = el.editor.getBoundingClientRect();
+      el.editor.style.transition = 'none';
+      el.editor.style.transform = 'translate(' + (from.left - to.left) + 'px,' + (from.top - to.top) + 'px) scale(' + (from.width / to.width) + ',' + (from.height / to.height) + ')';
+      el.editor.style.opacity = '0.5';
+      void el.editor.offsetWidth;
+      el.editor.style.transition = 'transform 0.34s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease';
+      el.editor.style.transform = '';
+      el.editor.style.opacity = '';
+    }
+    requestAnimationFrame(() => el.editBack.classList.add('show'));
+    el.editPlay.focus({ preventScroll: true });
+  }
+
+  function closeEditor(save) {
+    if (!edit) return;
+    stopEditPreview();
+    const { clip, tile } = edit;
+    let message = '';
+    if (save) {
+      const before = clip.manual ? clip.manual.join(':') : 'auto';
+      clip.manual = edit.useAuto ? null : [edit.s, edit.e];
+      const after = clip.manual ? clip.manual.join(':') : 'auto';
+      if (before !== after) {
+        unsaved = true;
+        ensureCache(clip);
+        message = 'Take ' + (clips.indexOf(clip) + 1) + (clip.manual ? ' trimmed to ' : ' back to auto trim: ') + clip.dur.toFixed(2) + ' s.';
+      }
+    }
+    edit = null;
+    el.editBack.classList.remove('show');
+    // Shrink back into the tile
+    if (!REDUCE_MOTION && tile && tile.isConnected) {
+      const from = el.editor.getBoundingClientRect(), to = tile.getBoundingClientRect();
+      el.editor.style.transition = 'transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.28s ease';
+      el.editor.style.transform = 'translate(' + (to.left - from.left) + 'px,' + (to.top - from.top) + 'px) scale(' + (to.width / from.width) + ',' + (to.height / from.height) + ')';
+      el.editor.style.opacity = '0';
+    }
+    setTimeout(() => {
+      el.editBack.hidden = true;
+      el.editor.style.transition = '';
+      el.editor.style.transform = '';
+      el.editor.style.opacity = '';
+      if (message) { render(); setStatus(message); }
+      const again = el.list.querySelector('[data-id="' + clip.id + '"] .tile-main');
+      if (again) again.focus({ preventScroll: true });
+    }, REDUCE_MOTION ? 0 : 290);
+  }
+
+  function sizeWave() {
+    const cv = el.editWave, dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    edit.w = w; edit.h = h; edit.dpr = dpr;
+    // One bar every 3 px across the whole original recording
+    const raw = edit.clip.raw, n = Math.max(1, Math.floor((w - 2 * EDGE) / 3));
+    const size = raw.length / n, peaks = new Float32Array(n);
+    let top = 1;
+    for (let b = 0; b < n; b++) {
+      let m = 0;
+      for (let i = Math.floor(b * size), end = Math.floor((b + 1) * size); i < end; i += 3) { const v = Math.abs(raw[i]); if (v > m) m = v; }
+      peaks[b] = m; if (m > top) top = m;
+    }
+    for (let b = 0; b < n; b++) peaks[b] = peaks[b] / top;
+    edit.peaks = peaks;
+  }
+
+  const xOf = (sample) => EDGE + (sample / edit.clip.raw.length) * (edit.w - 2 * EDGE);
+  const sampleOf = (x) => clamp((x - EDGE) / (edit.w - 2 * EDGE), 0, 1) * edit.clip.raw.length;
+
+  function drawEdit(playSample) {
+    if (!edit) return;
+    const g = el.editWave.getContext('2d'), { w, h, dpr, peaks, colors, s, e } = edit;
+    const len = edit.clip.raw.length;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const waveH = h - 34, mid = 8 + waveH / 2;
+    for (let b = 0; b < peaks.length; b++) {
+      const sample = ((b + 0.5) / peaks.length) * len;
+      const inside = sample >= s && sample <= e;
+      const bh = Math.max(2, peaks[b] * (waveH - 4));
+      g.globalAlpha = inside ? 1 : 0.28;
+      g.fillStyle = inside ? colors.bar : colors.ink;
+      g.fillRect(EDGE + b * 3, mid - bh / 2, 2, bh);
+    }
+    g.globalAlpha = 1;
+    // Handles: a line through the wave with a round grip underneath
+    [s, e].forEach((smp) => {
+      const x = xOf(smp);
+      g.fillStyle = colors.accent;
+      g.fillRect(x - 1.5, 6, 3, h - 30);
+      g.beginPath(); g.arc(x, h - 13, 10, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#ffffff';
+      g.fillRect(x - 1, h - 18, 2, 10);
+    });
+    if (playSample != null) {
+      const x = xOf(playSample);
+      g.fillStyle = colors.rec;
+      g.fillRect(x - 1, 4, 2, h - 26);
+    }
+  }
+
+  function refreshEdit(playSample) {
+    if (!edit) return;
+    const rate = edit.clip.rate, len = edit.clip.raw.length, c = edit.clip;
+    el.editStart.textContent = fmtTime(edit.s / rate);
+    el.editEnd.textContent = fmtTime(edit.e / rate);
+    el.editLen.textContent = ((edit.e - edit.s) / rate).toFixed(2) + ' s';
+    el.chipAuto.classList.toggle('on', edit.s === c.autoS && edit.e === c.autoE);
+    el.chipFull.classList.toggle('on', edit.s === 0 && edit.e === len);
+    if (!el.editPlay.innerHTML || playSample === undefined) el.editPlay.innerHTML = editAudio.paused ? ICON.play : ICON.pause;
+    drawEdit(playSample);
+  }
+
+  function setEdge(which, sample) {
+    const len = edit.clip.raw.length, minLen = Math.round(MIN_LEN * edit.clip.rate);
+    if (which === 's') edit.s = Math.round(clamp(sample, 0, edit.e - minLen));
+    else edit.e = Math.round(clamp(sample, edit.s + minLen, len));
+    edit.useAuto = false;
+    stopEditPreview();
+    refreshEdit();
+  }
+
+  el.waveWrap.addEventListener('pointerdown', (e) => {
+    if (!edit) return;
+    const x = e.clientX - el.waveWrap.getBoundingClientRect().left;
+    edit.drag = Math.abs(x - xOf(edit.s)) <= Math.abs(x - xOf(edit.e)) ? 's' : 'e';
+    try { el.waveWrap.setPointerCapture(e.pointerId); } catch (err) {}
+    setEdge(edit.drag, sampleOf(x));
+  });
+  el.waveWrap.addEventListener('pointermove', (e) => {
+    if (!edit || !edit.drag) return;
+    setEdge(edit.drag, sampleOf(e.clientX - el.waveWrap.getBoundingClientRect().left));
+  });
+  const endDrag = () => { if (edit) edit.drag = null; };
+  el.waveWrap.addEventListener('pointerup', endDrag);
+  el.waveWrap.addEventListener('pointercancel', endDrag);
+
+  el.editor.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-nudge]');
+    if (!b || !edit) return;
+    const which = b.dataset.nudge[0], dir = b.dataset.nudge[1] === '+' ? 1 : -1;
+    setEdge(which, (which === 's' ? edit.s : edit.e) + dir * NUDGE * edit.clip.rate);
+  });
+  el.chipAuto.addEventListener('click', () => {
+    if (!edit) return;
+    edit.s = edit.clip.autoS; edit.e = edit.clip.autoE;
+    edit.useAuto = !isNatural();      // with natural gaps, auto trim has to be stored as a hand trim
+    stopEditPreview(); refreshEdit();
+  });
+  el.chipFull.addEventListener('click', () => {
+    if (!edit) return;
+    edit.s = 0; edit.e = edit.clip.raw.length;
+    edit.useAuto = false;
+    stopEditPreview(); refreshEdit();
+  });
+
+  // Preview just the trimmed part, with a moving playhead
+  function stopEditPreview() {
+    editAudio.pause();
+    if (editUrl) { URL.revokeObjectURL(editUrl); editUrl = null; }
+    if (edit) refreshEdit();
+  }
+  el.editPlay.addEventListener('click', () => {
+    if (!edit) return;
+    if (!editAudio.paused) { stopEditPreview(); return; }
+    const c = edit.clip, pcm = cutPcm(c.raw, edit.s, edit.e, c.rate);
+    editUrl = URL.createObjectURL(new Blob([wavHeader(pcm.byteLength, c.rate), pcm.buffer], { type: 'audio/wav' }));
+    editAudio.src = editUrl;
+    editAudio.play().then(() => {
+      el.editPlay.innerHTML = ICON.pause;
+      const step = () => {
+        if (!edit || editAudio.paused) return;
+        drawEdit(edit.s + editAudio.currentTime * c.rate);
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }).catch(() => {});
+  });
+  editAudio.addEventListener('ended', stopEditPreview);
+
+  el.editSave.addEventListener('click', () => closeEditor(true));
+  el.editCancel.addEventListener('click', () => closeEditor(false));
+  el.editBack.addEventListener('click', (e) => { if (e.target === el.editBack) closeEditor(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && edit) closeEditor(false); });
+  window.addEventListener('resize', () => { if (edit) { sizeWave(); refreshEdit(); } });
 
   /* ---------- new recording ---------- */
   let sheetReturn = null;
@@ -1161,7 +1506,7 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
     if (file) addClip(file);
   });
   document.addEventListener('keydown', (e) => {
-    if (e.code !== 'Space' || !el.sheetBack.hidden) return;
+    if (e.code !== 'Space' || !el.sheetBack.hidden || !el.editBack.hidden) return;
     const tag = e.target && e.target.tagName;
     if (tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'INPUT') return;
     e.preventDefault();
@@ -1175,6 +1520,13 @@ body.editing .script { padding-top: calc(14px + env(safe-area-inset-top, 0px)); 
   });
 
   window.__voHasClips = () => clips.length > 0 || recording;
+  // Android Back: close whatever is open first, then ask before leaving if takes would be lost
+  window.__voBack = () => {
+    if (edit) { closeEditor(false); return 'handled'; }
+    if (!el.sheetBack.hidden) { closeSheet(); return 'handled'; }
+    if (document.activeElement === el.ta) { el.ta.blur(); return 'handled'; }
+    return window.__voHasClips() ? 'ask' : 'leave';
+  };
 
   if (!micPossible) setMode('phone');
   render();
