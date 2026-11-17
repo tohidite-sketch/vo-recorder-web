@@ -1133,10 +1133,19 @@ svg { display: block; }
 
   const fmtTime = (sec) => { const m = Math.floor(sec / 60), s = sec - m * 60; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(2); };
 
+  // While the microphone is open, iPhone sends playback to the quiet earpiece (or mutes it).
+  // So the camera and microphone are paused while a take is being trimmed.
+  function setSession(type) {
+    try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (err) {}
+  }
+
   function openEditor(clip, tile) {
     if (recording || busy || edit || joining) return;
     const r = rangeOf(clip);
-    edit = { clip, s: r[0], e: r[1], useAuto: !clip.manual, tile, drag: null, playing: false };
+    const camWasOn = !!stream;
+    if (camWasOn) { stopCamera(); el.camOff.hidden = false; el.flipBtn.hidden = true; }
+    setSession('playback');
+    edit = { clip, s: r[0], e: r[1], useAuto: !clip.manual, tile, drag: null, playing: false, camWasOn };
     el.editor.style.setProperty('--h', clip.hue);
     el.editTitle.textContent = 'Take ' + pad(clips.indexOf(clip) + 1);
     el.editVideo.poster = clip.thumb || '';
@@ -1177,7 +1186,7 @@ svg { display: block; }
   function closeEditor(save) {
     if (!edit) return;
     stopPreview();
-    const { clip, tile } = edit;
+    const { clip, tile, camWasOn } = edit;
     let message = '';
     if (save) {
       const before = clip.manual ? clip.manual.join(':') : 'auto';
@@ -1202,6 +1211,8 @@ svg { display: block; }
       el.editVideo.onloadedmetadata = null;
       el.editVideo.pause(); el.editVideo.removeAttribute('src'); el.editVideo.removeAttribute('poster'); el.editVideo.load();
       if (message) { render(); setStatus(message); makeThumb(clip); }
+      setSession('auto');
+      if (camWasOn && !joining) startCamera().then(() => { if (message) setStatus(message); });
     }, REDUCE_MOTION ? 0 : 290);
   }
 
@@ -1304,6 +1315,7 @@ svg { display: block; }
     if (edit.playing) { stopPreview(); return; }
     const c = edit.clip, v = el.editVideo, end = edit.e / c.rate;
     v.muted = false;
+    v.volume = 1;
     try { v.currentTime = edit.s / c.rate; } catch (err) {}
     v.play().then(() => {
       edit.playing = true;
@@ -1326,16 +1338,300 @@ svg { display: block; }
   /* ---------- join all: play every take through a canvas and record it as one video ---------- */
   let joining = false, joinCancelled = false, joined = null;
 
+  /* Exact join: every frame is decoded and re-encoded in order, not in real time.
+     The picture is resampled to a steady frame rate on the same timeline as the sound, so they cannot drift. */
+  const LIBS = [
+    'https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js',
+    'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js',
+  ];
+  let libsReady = null;
+  function loadLibs() {
+    if (!libsReady) {
+      libsReady = Promise.all(LIBS.map((src) => new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('the video tools could not be downloaded'));
+        document.head.appendChild(s);
+      }))).catch((err) => { libsReady = null; throw err; });
+    }
+    return libsReady;
+  }
+  const canJoinExact = () => !!(window.VideoDecoder && window.VideoEncoder && window.AudioEncoder && window.VideoFrame && window.AudioData);
+
+  // Read the frames of one take without playing it
+  function demux(buf) {
+    return new Promise((resolve, reject) => {
+      const file = MP4Box.createFile();
+      let vt = null, at = null, firstAudio = null, failed = false;
+      const samples = [];
+      file.onError = (e) => { failed = true; reject(new Error('a take could not be read (' + e + ')')); };
+      file.onReady = (info) => {
+        vt = info.videoTracks[0]; at = info.audioTracks[0];
+        if (!vt) return;
+        file.setExtractionOptions(vt.id, 'v', { nbSamples: 500 });
+        if (at) file.setExtractionOptions(at.id, 'a', { nbSamples: 1 });
+        file.start();
+      };
+      file.onSamples = (id, user, list) => {
+        if (user === 'v') { for (const s of list) samples.push(s); }
+        else if (firstAudio == null && list.length) firstAudio = list[0];
+      };
+      buf.fileStart = 0;
+      file.appendBuffer(buf);
+      file.flush();
+      if (failed) return;
+      if (!vt || !samples.length) { reject(new Error('a take has no readable picture')); return; }
+      let description;
+      const trak = file.getTrackById(vt.id);
+      for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+        const box = entry.avcC || entry.hvcC;
+        if (box) {
+          const ds = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+          box.write(ds);
+          description = new Uint8Array(ds.buffer, 8);
+          break;
+        }
+      }
+      let codec = vt.codec;
+      for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+        if (entry.vpcC) {
+          const two = (n) => String(n).padStart(2, '0');
+          codec = 'vp09.' + two(entry.vpcC.profile) + '.' + two(entry.vpcC.level || 10) + '.' + two(entry.vpcC.bitDepth || 8);
+        }
+      }
+      const m = vt.matrix || [65536, 0, 0, 0, 65536, 0];
+      const rot = ((Math.round(Math.atan2(m[1], m[0]) * 180 / Math.PI) % 360) + 360) % 360;
+      samples.sort((a, b) => a.dts - b.dts);
+      // Presentation time = stored time minus the track's edit-list start (this is how players line tracks up)
+      const editStart = (id) => {
+        try {
+          const t = file.getTrackById(id), e = t.edts && t.edts.elst && t.edts.elst.entries;
+          const first = e && e.find((x) => x.media_time >= 0);
+          return first ? first.media_time / t.mdia.mdhd.timescale : 0;
+        } catch (err) { return 0; }
+      };
+      const vEdit = editStart(vt.id);
+      const aPres0 = firstAudio ? firstAudio.cts / firstAudio.timescale - editStart(at.id) : 0;
+      resolve({ track: vt, codec, samples, description, rot, vEdit, audioStart: Math.max(0, aPres0) });
+    });
+  }
+
+  function drawFrame(g, f, rot, W, H) {
+    const fw = f.displayWidth, fh = f.displayHeight;
+    const rw = rot % 180 ? fh : fw, rh = rot % 180 ? fw : fh;
+    const s = Math.min(W / rw, H / rh);
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, W, H);
+    g.save();
+    g.translate(W / 2, H / 2);
+    g.rotate(rot * Math.PI / 180);
+    g.drawImage(f, -fw * s / 2, -fh * s / 2, fw * s, fh * s);
+    g.restore();
+  }
+
+  async function pickVideoConfig(W, H, fps) {
+    const codecs = ['avc1.640033', 'avc1.640034', 'avc1.4d0033', 'avc1.42e033', 'avc1.640028'];
+    for (const scale of [1, 0.75, 0.5]) {
+      const w = Math.round(W * scale / 2) * 2, h = Math.round(H * scale / 2) * 2;
+      for (const codec of codecs) {
+        const cfg = { codec, width: w, height: h, bitrate: bitsNow(), framerate: fps, avc: { format: 'avc' } };
+        try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (err) {}
+      }
+    }
+    return null;
+  }
+
+  async function pickAudioConfig(rate, ch) {
+    for (const codec of ['mp4a.40.2', 'opus']) {
+      const cfg = { codec, sampleRate: rate, numberOfChannels: ch, bitrate: 192000 };
+      try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (err) {}
+    }
+    return null;
+  }
+
+  async function joinExact() {
+    el.joinText.textContent = 'Getting the video tools ready…';
+    await loadLibs();
+    const fps = settings.fps;
+    const total = joinedSeconds();
+    const parsed = [];
+    for (let i = 0; i < clips.length; i++) {
+      if (joinCancelled) throw new Error('cancelled');
+      el.joinText.textContent = 'Reading take ' + (i + 1) + ' of ' + clips.length + '…';
+      parsed.push(await demux(await clips[i].blob.arrayBuffer()));
+    }
+
+    // The first take sets the size; any other shape is fitted inside it with black bars, never cropped
+    const p0 = parsed[0];
+    let W = p0.rot % 180 ? p0.track.video.height : p0.track.video.width;
+    let H = p0.rot % 180 ? p0.track.video.width : p0.track.video.height;
+    const cap = Math.min(1, Math.sqrt(8847360 / (W * H)));
+    W = Math.round(W * cap / 2) * 2; H = Math.round(H * cap / 2) * 2;
+    const vcfg = await pickVideoConfig(W, H, fps);
+    if (!vcfg) throw new Error('this phone cannot make an H.264 video at this size');
+    W = vcfg.width; H = vcfg.height;
+
+    const withSound = clips.find((c) => c.audio);
+    const rate = withSound ? withSound.audio.sampleRate : 48000;
+    const ch = withSound ? Math.min(2, withSound.audio.numberOfChannels) : 2;
+    const acfg = await pickAudioConfig(rate, ch);
+    if (!acfg) throw new Error('this phone cannot encode the sound here');
+
+    const muxer = new Mp4Muxer.Muxer({
+      target: new Mp4Muxer.ArrayBufferTarget(),
+      video: { codec: 'avc', width: W, height: H, frameRate: fps },
+      audio: { codec: acfg.codec === 'opus' ? 'opus' : 'aac', numberOfChannels: ch, sampleRate: rate },
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    });
+    let failure = null;
+    const venc = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: (e) => { failure = e; } });
+    venc.configure(vcfg);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+    const totalTicks = Math.max(1, Math.round(total * fps));
+    let tick = 0, lastKey = -1e9;
+    const tickTime = () => tick / fps;
+    const emit = () => {
+      const t = tickTime();
+      const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(1e6 / fps) });
+      const key = t - lastKey >= 2;
+      if (key) lastKey = t;
+      venc.encode(vf, { keyFrame: key });
+      vf.close();
+      tick++;
+      if (tick % 5 === 0) el.joinBar.style.width = (tick / totalTicks * 90).toFixed(1) + '%';
+    };
+    const settle = async () => {
+      while (venc.encodeQueueSize > 6) { if (failure) throw failure; await sleep(4); }
+      if (failure) throw failure;
+      if (joinCancelled) throw new Error('cancelled');
+    };
+
+    let off = 0;
+    for (let i = 0; i < clips.length; i++) {
+      const c = clips[i], p = parsed[i], r = rangeSec(c), len = r[1] - r[0];
+      if (i > 0) {
+        const gap = insertBetween(clips[i - 1], c);
+        const gapEnd = off + gap;
+        while (tickTime() < gapEnd - 1e-6) { emit(); await settle(); }   // hold the last frame through the pause
+        off = gapEnd;
+      }
+      el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + '…';
+      const end = off + len;
+      const queue = [];
+      let decFail = null;
+      const dec = new VideoDecoder({ output: (f) => queue.push(f), error: (e) => { decFail = e; } });
+      dec.configure({ codec: p.codec, codedWidth: p.track.video.width, codedHeight: p.track.video.height, description: p.description });
+      const shift = p.vEdit + p.audioStart;   // take time 0 is where its sound starts
+      const handle = async (f) => {
+        const o = off + (f.timestamp / 1e6 - shift - r[0]);
+        if (o < end) {
+          while (tickTime() < o - 1e-6 && tickTime() < end - 1e-6) { emit(); await settle(); }
+          drawFrame(g, f, p.rot, W, H);
+        }
+        f.close();
+      };
+      const drain = async () => { while (queue.length) await handle(queue.shift()); };
+      for (const s of p.samples) {
+        if (decFail) throw decFail;
+        dec.decode(new EncodedVideoChunk({
+          type: s.is_sync ? 'key' : 'delta',
+          timestamp: Math.round(s.cts * 1e6 / s.timescale),
+          duration: Math.round(s.duration * 1e6 / s.timescale),
+          data: s.data,
+        }));
+        while (dec.decodeQueueSize > 4 || queue.length > 2) { await drain(); if (dec.decodeQueueSize > 4) await sleep(2); }
+        await drain();
+        if (s.cts / s.timescale - shift > r[1] + 0.5) break;   // well past the trimmed end
+      }
+      await dec.flush().catch(() => {});
+      await drain();
+      dec.close();
+      if (decFail) throw decFail;
+      while (tickTime() < end - 1e-6) { emit(); await settle(); }
+      off = end;
+      p.samples.length = 0;
+    }
+    while (tick < totalTicks) { emit(); await settle(); }
+    await venc.flush();
+    venc.close();
+
+    // Sound: the same cuts and pauses, sample-exact, with tiny fades so cuts do not click
+    el.joinText.textContent = 'Adding the sound…';
+    const N = Math.max(1, Math.round(total * rate));
+    const outs = [];
+    for (let k = 0; k < ch; k++) outs.push(new Float32Array(N));
+    off = 0;
+    clips.forEach((c, i) => {
+      if (i > 0) off += insertBetween(clips[i - 1], c);
+      const r = rangeSec(c), len = r[1] - r[0];
+      if (c.audio) {
+        const a = c.audio, ratio = a.sampleRate / rate, n = Math.round(len * rate), fade = Math.round(0.012 * rate);
+        const start = Math.round(off * rate), from = r[0] * a.sampleRate;
+        for (let k = 0; k < ch; k++) {
+          const src = a.getChannelData(Math.min(k, a.numberOfChannels - 1)), dst = outs[k];
+          for (let j = 0; j < n && start + j < N; j++) {
+            let v = src[Math.floor(from + j * ratio)] || 0;
+            if (j < fade) v *= j / fade; else if (n - j < fade) v *= (n - j) / fade;
+            dst[start + j] = v;
+          }
+        }
+      }
+      off += len;
+    });
+    const aenc = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: (e) => { failure = e; } });
+    aenc.configure(acfg);
+    const step = 4096;
+    for (let i = 0; i < N; i += step) {
+      const n = Math.min(step, N - i), data = new Float32Array(n * ch);
+      for (let k = 0; k < ch; k++) data.set(outs[k].subarray(i, i + n), k * n);
+      const ad = new AudioData({ format: 'f32-planar', sampleRate: rate, numberOfFrames: n, numberOfChannels: ch, timestamp: Math.round(i / rate * 1e6), data });
+      aenc.encode(ad);
+      ad.close();
+      while (aenc.encodeQueueSize > 16) { if (failure) throw failure; await sleep(2); }
+      if (joinCancelled) throw new Error('cancelled');
+    }
+    await aenc.flush();
+    aenc.close();
+    if (failure) throw failure;
+    muxer.finalize();
+    el.joinBar.style.width = '100%';
+    return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  }
+
   async function joinAll() {
     if (!clips.length || joining || recording) return;
     joining = true; joinCancelled = false; joined = null;
     el.joinTitle.textContent = 'Joining your takes';
-    el.joinText.textContent = 'The takes play through once to make one video (' + clock(joinedSeconds()) + '). Keep this screen open.';
+    el.joinText.textContent = 'Getting ready…';
     el.joinBar.style.width = '0%';
     el.joinSave.hidden = true;
     el.joinClose.textContent = 'Cancel';
     el.joinBack.hidden = false;
+    // The camera is switched off while joining: it frees the phone's video hardware
+    if (stream) { stopCamera(); el.camOff.hidden = false; el.flipBtn.hidden = true; }
+    let blob = null, why = '';
+    if (canJoinExact()) {
+      try { blob = await joinExact(); }
+      catch (err) { why = (err && err.message) || String(err); }
+    } else {
+      why = 'this browser is missing the frame-by-frame video tools; updating iOS adds them';
+    }
+    if (joinCancelled) { finishJoin(null, ''); return; }
+    if (!blob) {
+      el.joinBar.style.width = '0%';
+      el.joinText.textContent = 'Using the slower live method because ' + why + '. Keep this screen open.';
+      blob = await joinRealtime();
+      if (joinCancelled) { finishJoin(null, ''); return; }
+      if (!blob) { finishJoin(null, 'Joining is not supported in this browser.'); return; }
+    }
+    finishJoin(blob, '');
+  }
 
+  async function joinRealtime() {
     const ac = audioCtx();
     const first = await loadVideo(clips[0].url);
     let W = first.videoWidth || 1080, H = first.videoHeight || 1920;
@@ -1355,8 +1651,7 @@ svg { display: block; }
     try {
       out = new MediaRecorder(mixed, type ? { mimeType: type, videoBitsPerSecond: bitsNow(), audioBitsPerSecond: 192000 } : undefined);
     } catch (err) {
-      finishJoin(null, 'Joining is not supported in this browser.');
-      return;
+      return null;
     }
     const parts = [];
     out.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
@@ -1414,8 +1709,8 @@ svg { display: block; }
     cancelAnimationFrame(raf);
     vTrack.stop();
     if (current) dropVideo(current);
-    if (joinCancelled) { finishJoin(null, ''); return; }
-    finishJoin(new Blob(parts, { type: out.mimeType || type || 'video/mp4' }), '');
+    if (joinCancelled) return null;
+    return new Blob(parts, { type: out.mimeType || type || 'video/mp4' });
   }
 
   function finishJoin(blob, error) {
