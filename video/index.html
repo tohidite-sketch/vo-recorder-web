@@ -252,6 +252,9 @@ svg { display: block; }
 .btn-quiet { background: var(--soft); color: var(--ink); }
 .btn-danger { background: color-mix(in srgb, var(--rec) 16%, var(--surface)); color: var(--rec); }
 .progress { height: 8px; border-radius: 4px; background: var(--soft); overflow: hidden; margin: 0 0 18px; }
+.join-preview { display: flex; justify-content: center; margin: 0 0 14px; }
+.join-preview:empty { display: none; }
+.join-preview video { max-width: 100%; max-height: 28vh; border-radius: 14px; background: #000; }
 .progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width 0.25s linear; }
 
 /* Trim editor */
@@ -387,8 +390,10 @@ svg { display: block; }
     <div class="grabber" aria-hidden="true"></div>
     <h2 id="joinTitle">Joining your takes</h2>
     <p id="joinText">The takes play through once to make one video. Keep this screen open.</p>
+    <div class="join-preview" id="joinPreview"></div>
     <div class="progress"><i id="joinBar"></i></div>
     <div class="sheet-actions">
+      <button id="joinTap" class="btn-primary" type="button" hidden>Tap to continue joining</button>
       <button id="joinSave" class="btn-primary" type="button" hidden>Save video</button>
       <button id="joinClose" class="btn-quiet" type="button">Cancel</button>
     </div>
@@ -467,7 +472,7 @@ svg { display: block; }
     toast: $('toast'), toastText: $('toastText'), undo: $('undo'), capture: $('capture'),
     sheetBack: $('sheetBack'), sheetText: $('sheetText'), clearBtn: $('clearBtn'), cancelBtn: $('cancelBtn'),
     joinBack: $('joinBack'), joinTitle: $('joinTitle'), joinText: $('joinText'), joinBar: $('joinBar'),
-    joinSave: $('joinSave'), joinClose: $('joinClose'),
+    joinSave: $('joinSave'), joinClose: $('joinClose'), joinPreview: $('joinPreview'), joinTap: $('joinTap'),
     editBack: $('editBack'), editor: $('editor'), editTitle: $('editTitle'), editLen: $('editLen'),
     editVideo: $('editVideo'), waveWrap: $('waveWrap'), editWave: $('editWave'),
     editStart: $('editStart'), editEnd: $('editEnd'), editPlay: $('editPlay'),
@@ -1550,12 +1555,26 @@ svg { display: block; }
     duration: Math.round(s.duration * 1e6 / s.timescale),
     data: s.data,
   });
-  const decoderConfig = (p) => ({ codec: p.codec, codedWidth: p.track.video.width, codedHeight: p.track.video.height, description: p.description });
+  const decoderConfig = (p) => ({ codec: p.decCodec || p.codec, codedWidth: p.track.video.width, codedHeight: p.track.video.height, description: p.description });
 
   // Can this phone's decoder really read this take? (very large frames are refused on some iPhones)
   async function probeDecoder(p) {
-    const cfg = decoderConfig(p);
-    try { if (!(await VideoDecoder.isConfigSupported(cfg)).supported) return false; } catch (err) { return false; }
+    const base = p.codec, alts = [base];
+    if (/^avc1\.[0-9a-f]{6}$/i.test(base)) {
+      const prof = base.slice(5, 9);
+      ['34', '33', '32'].forEach((lv) => alts.push('avc1.' + prof + lv));
+      alts.push('avc1.640034', 'avc1.4d0034');
+    }
+    for (const codec of alts.filter((c, i, a) => a.indexOf(c) === i)) {
+      const cfg = Object.assign(decoderConfig(p), { codec });
+      let ok = false;
+      try { ok = (await VideoDecoder.isConfigSupported(cfg)).supported; } catch (err) {}
+      if (ok && await decodeTest(p, cfg)) { p.decCodec = codec; return true; }
+    }
+    return false;
+  }
+
+  function decodeTest(p, cfg) {
     return new Promise((resolve) => {
       let frames = 0, bad = false, dec = null, settled = false;
       const fin = (v) => { if (settled) return; settled = true; clearTimeout(timer); try { dec.close(); } catch (e) {} resolve(v); };
@@ -1569,34 +1588,74 @@ svg { display: block; }
     });
   }
 
-  // Second way to read frames: let the phone's own video player decode the take, and copy each frame it shows
-  // with its exact time. Playback pauses whenever the encoder falls behind, so no frame is skipped.
-  async function feedFromPlayer(c, r, shift, handle) {
+  // Second way to read frames, for takes the decoder refuses (e.g. 12 MP on iPhone): the phone's own player
+  // plays the take visibly in the join sheet (iPhone will not play hidden videos), pausing on every frame
+  // while that exact frame is copied, so nothing is skipped and every frame keeps its true time.
+  function playerTap(v) {
+    return new Promise((resolve) => {
+      el.joinTap.hidden = false;
+      el.joinTap.onclick = () => { el.joinTap.hidden = true; v.play().then(() => resolve(true), () => resolve(false)); };
+    });
+  }
+
+  // One player is reused for every take, so a tap (if iPhone asks for one) is needed at most once per join
+  let joinPlayer = null;
+  function releaseJoinPlayer() {
+    if (!joinPlayer) return;
+    try { joinPlayer.pause(); } catch (e) {}
+    joinPlayer.removeAttribute('src'); joinPlayer.load();
+    joinPlayer = null;
+    el.joinPreview.innerHTML = '';
+    el.joinTap.hidden = true;
+  }
+
+  async function feedFromPlayer(c, r, place) {
     if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) throw new Error('this browser cannot read frames from its player');
-    const v = await loadVideo(c.url);
-    await seekTo(v, Math.max(0, r[0] - 0.12));
-    const queue = [];
-    let finished = false, lastFrameAt = performance.now();
-    const onFrame = (now, md) => {
-      if (finished) return;
-      lastFrameAt = performance.now();
-      const t = md.mediaTime;
-      try { queue.push(new VideoFrame(v, { timestamp: Math.round((t + shift) * 1e6) })); } catch (err) {}
-      if (t >= r[1] || v.ended) { finished = true; v.pause(); return; }
-      if (queue.length >= 3) v.pause();
-      v.requestVideoFrameCallback(onFrame);
-    };
-    v.requestVideoFrameCallback(onFrame);
-    try { await v.play(); } catch (err) { dropVideo(v); throw new Error('the phone would not play a take to read it'); }
-    while (!finished || queue.length) {
-      if (queue.length) { await handle(queue.shift(), 0); continue; }
-      if (v.ended) finished = true;
-      if (!finished && v.paused) { lastFrameAt = performance.now(); v.play().catch(() => {}); }
-      if (!finished && performance.now() - lastFrameAt > 4000) finished = true;   // stuck: keep what we have
-      if (joinCancelled) { finished = true; queue.forEach((f) => f.close()); queue.length = 0; }
-      await sleep(4);
+    if (!joinPlayer) {
+      joinPlayer = document.createElement('video');
+      joinPlayer.muted = true; joinPlayer.playsInline = true; joinPlayer.setAttribute('playsinline', ''); joinPlayer.setAttribute('muted', ''); joinPlayer.preload = 'auto';
+      el.joinPreview.innerHTML = '';
+      el.joinPreview.appendChild(joinPlayer);
     }
-    dropVideo(v);
+    const v = joinPlayer;
+    try {
+      const opened = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(false), 10000);
+        v.addEventListener('loadedmetadata', () => { clearTimeout(t); resolve(true); }, { once: true });
+        v.addEventListener('error', () => { clearTimeout(t); resolve(false); }, { once: true });
+        v.src = c.url;
+        v.load();
+      });
+      if (!opened) throw new Error('the phone could not open a take in its player');
+      await seekTo(v, Math.max(0, r[0] - 0.1));
+      let last = -1;
+      for (;;) {
+        if (joinCancelled) throw new Error('cancelled');
+        // play until the next frame is shown, then hold it
+        const t = await new Promise((resolve) => {
+          let done = false;
+          const finish = (x) => { if (!done) { done = true; clearTimeout(timer); resolve(x); } };
+          const timer = setTimeout(() => finish(v.ended ? 'end' : 'stuck'), 4000);
+          v.requestVideoFrameCallback((now, md) => { v.pause(); finish(md.mediaTime); });
+          v.addEventListener('ended', () => finish('end'), { once: true });
+          v.play().catch(async () => {
+            // iPhone wants a tap (e.g. Low Power Mode): ask for one, then carry on
+            el.joinText.textContent = 'iPhone needs a tap to keep reading the takes.';
+            if (!(await playerTap(v))) finish('blocked');
+          });
+        });
+        if (t === 'end') break;
+        if (t === 'blocked') throw new Error('the phone would not play a take, even after a tap');
+        if (t === 'stuck') { if (v.currentTime >= r[1] - 0.05) break; throw new Error('the player stopped at ' + v.currentTime.toFixed(2) + 's'); }
+        if (t <= last) continue;
+        last = t;
+        await place(t, v);
+        if (t >= r[1]) break;
+      }
+    } finally {
+      el.joinTap.hidden = true;
+      try { v.pause(); } catch (e) {}
+    }
   }
 
   async function pickAudioConfig(rate, ch) {
@@ -1736,14 +1795,15 @@ svg { display: block; }
       st.stage = 'joining take ' + (i + 1) + (p.useDecoder ? '' : ' through the player');
       const end = off + len;
       const shift = p.vEdit + p.audioStart;   // take time 0 is where its sound starts
-      const handle = async (f, rot) => {
-        const o = off + (f.timestamp / 1e6 - shift - r[0]);
+      // put a frame (at take time t) on the timeline: hold the previous picture until its moment, then draw it
+      const place = async (t, draw) => {
+        const o = off + (t - r[0]);
         if (o < end) {
           while (tickTime() < o - 1e-6 && tickTime() < end - 1e-6) { await emit(); await settle(); }
-          drawFrame(g, f, rot, W, H);
+          draw();
         }
-        f.close();
       };
+      const handle = async (f, rot) => { await place(f.timestamp / 1e6 - shift, () => drawFrame(g, f, rot, W, H)); f.close(); };
       if (p.useDecoder) {
         const queue = [];
         let decFail = null;
@@ -1763,8 +1823,8 @@ svg { display: block; }
         dec.close();
         if (decFail) throw decError();
       } else {
-        el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + ' (large video, read through the player)…';
-        await feedFromPlayer(c, r, shift, handle);
+        el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + ' (large video, frame by frame through the player)…';
+        await feedFromPlayer(c, r, (t, v) => place(t, () => drawContain(g, v, W, H)));
       }
       while (tickTime() < end - 1e-6) { await emit(); await settle(); }
       off = end;
@@ -1881,6 +1941,7 @@ svg { display: block; }
         jlog('--- try ' + (a + 1) + ' ' + JSON.stringify(attempts[a]));
         try { blob = await joinExact(attempts[a]); }
         catch (err) { if (!joinCancelled) { reasons.push((err && err.message) || String(err)); jlog('FAILED: ' + reasons[reasons.length - 1]); } }
+        finally { releaseJoinPlayer(); }
       }
       why = reasons.map((r, i) => 'try ' + (i + 1) + ': ' + r).join('; ');
     } else {
