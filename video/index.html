@@ -313,7 +313,18 @@ svg { display: block; }
   border-radius: 14px 14px 0 0;
 }
 .sheet-nav h2 { margin: 0; font-size: 17px; font-weight: 600; }
-.sheet-scroll { overflow-y: auto; padding: 4px 16px 8px; -webkit-overflow-scrolling: touch; }
+.sheet-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 8px; -webkit-overflow-scrolling: touch; }
+/* Video options slides up like an iPhone page sheet, can be dragged down to close, and slides away again */
+#optBack { animation: none; background: rgba(0, 0, 0, 0); transition: background-color 0.35s ease; }
+#optBack.show { background: rgba(0, 0, 0, 0.45); }
+#optBack .sheet { animation: none; transform: translateY(100%); transition: transform 0.45s cubic-bezier(0.32, 0.72, 0, 1); will-change: transform; touch-action: pan-y; }
+#optBack.show .sheet { transform: none; }
+#optBack .sheet.dragging { transition: none; }
+#optBack .sheet-nav { position: relative; padding-top: 14px; touch-action: none; cursor: grab; }
+#optBack .sheet-nav::before { content: ''; position: absolute; top: 5px; left: 50%; width: 36px; height: 5px; margin-left: -18px; border-radius: 3px; background: var(--surface-3); }
+#optNow { min-height: 2.7em; }
+.segmented { transition: opacity 0.2s ease; }
+.segmented.busy { opacity: 0.45; pointer-events: none; }
 .section-header { margin: 22px 16px 7px; font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: 0; }
 .section-footer { margin: 7px 16px 0; font-size: 13px; color: var(--muted); line-height: 1.35; }
 .section-footer.top { margin: 16px 16px 0; color: var(--ink); font-size: 15px; text-align: center; }
@@ -328,6 +339,7 @@ svg { display: block; }
   padding: 7px 4px; font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
+.seg { transition: background-color 0.2s ease; }
 .seg.on { background: #636366; font-weight: 600; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04); }
 .seg:active:not(:disabled) { opacity: 0.7; }
 
@@ -374,7 +386,7 @@ svg { display: block; }
 
 @media (prefers-reduced-motion: reduce) {
   .tile.fresh, .sheet, .action-sheet, .backdrop { animation: none; }
-  .edit-back, .rec span { transition: none; }
+  .edit-back, .rec span, #optBack, #optBack .sheet { transition: none; }
 }
 </style>
 </head>
@@ -1020,28 +1032,73 @@ svg { display: block; }
   /* ---------- video options ---------- */
   const chipsHtml = (items, key, cur) => items.map((it) =>
     '<button type="button" class="seg' + (String(it.v) === String(cur) ? ' on' : '') + '" data-k="' + key + '" data-v="' + it.v + '">' + it.t + '</button>').join('');
+  // rebuild a row only when its choices change; otherwise just move the highlight (no flicker, no jump)
+  function setChips(box, items, key, cur) {
+    const sig = items.map((it) => it.v + ':' + it.t).join('|');
+    if (box.dataset.sig !== sig) { box.innerHTML = chipsHtml(items, key, cur); box.dataset.sig = sig; return; }
+    box.querySelectorAll('.seg').forEach((b) => b.classList.toggle('on', b.dataset.v === String(cur)));
+  }
 
   function renderOptions() {
     const cams = [{ v: 'front', t: 'Front' }].concat(lenses.length
       ? lenses.map((l, i) => ({ v: 'back' + i, t: lenses.length > 1 ? 'Back ' + l.name : 'Back' }))
       : [{ v: 'back0', t: 'Back' }]);
-    el.optCam.innerHTML = chipsHtml(cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
-    el.optRes.innerHTML = chipsHtml(RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
-    el.optFps.innerHTML = chipsHtml(FPS.map((f) => ({ v: f, t: String(f) })), 'fps', settings.fps);
-    el.optBoost.innerHTML = chipsHtml([{ v: 'on', t: 'Voice Boost' }, { v: 'off', t: 'Original Level' }], 'boost', settings.boost);
-    el.optBit.innerHTML = chipsHtml(BITS.map((b) => ({ v: b.id, t: String(Math.round(b.bps / 1e6)) })), 'bits', settings.bits);
+    setChips(el.optCam, cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
+    setChips(el.optRes, RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
+    setChips(el.optFps, FPS.map((f) => ({ v: f, t: String(f) })), 'fps', settings.fps);
+    setChips(el.optBoost, [{ v: 'on', t: 'Voice Boost' }, { v: 'off', t: 'Original Level' }], 'boost', settings.boost);
+    setChips(el.optBit, BITS.map((b) => ({ v: b.id, t: String(Math.round(b.bps / 1e6)) })), 'bits', settings.bits);
     const now = el.vfInfo.textContent.replace(/^\S+ /, '');
     el.optNow.textContent = !stream ? 'Turn on the camera to see what it records.'
       : 'Recording at ' + now + (activeRes !== settings.res ? ' (the camera could not do ' + resById(settings.res).label + ')' : '');
   }
 
+  const optSheet = el.optBack.querySelector('.sheet');
+  let optTimer = 0;
   function openOptions() {
     if (recording || busy || joining || edit) return;
+    if (!el.optBack.hidden && el.optBack.classList.contains('show')) return;
+    clearTimeout(optTimer);
     renderOptions();
+    optSheet.style.transform = '';
     el.optBack.hidden = false;
+    void optSheet.offsetHeight;   // lay it out off-screen first so it slides in rather than popping
+    el.optBack.classList.add('show');
     el.optDone.focus({ preventScroll: true });
   }
-  const closeOptions = () => { el.optBack.hidden = true; };
+  function closeOptions() {
+    if (el.optBack.hidden) return;
+    optSheet.classList.remove('dragging');
+    optSheet.style.transform = '';
+    el.optBack.classList.remove('show');
+    clearTimeout(optTimer);
+    optTimer = setTimeout(() => { if (!el.optBack.classList.contains('show')) el.optBack.hidden = true; }, REDUCE_MOTION ? 0 : 460);
+  }
+  // drag the top bar down to close, like an iPhone sheet
+  (() => {
+    const nav = optSheet.querySelector('.sheet-nav');
+    let y0 = 0, dy = 0, t0 = 0, id = null;
+    nav.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      id = e.pointerId; y0 = e.clientY; dy = 0; t0 = performance.now();
+      nav.setPointerCapture(id); optSheet.classList.add('dragging');
+    });
+    nav.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== id) return;
+      dy = Math.max(0, e.clientY - y0);
+      optSheet.style.transform = 'translateY(' + dy + 'px)';
+    });
+    const end = (e) => {
+      if (e.pointerId !== id) return;
+      id = null;
+      optSheet.classList.remove('dragging');
+      const fast = dy / Math.max(1, performance.now() - t0) > 0.5;
+      if (dy > 110 || (fast && dy > 30)) closeOptions();
+      else optSheet.style.transform = '';
+    };
+    nav.addEventListener('pointerup', end);
+    nav.addEventListener('pointercancel', end);
+  })();
 
   el.viewfinder.addEventListener('click', (e) => {
     if (e.target.closest('button') || !stream) return;
@@ -1067,9 +1124,12 @@ svg { display: block; }
     saveSettings();
     renderOptions();
     if (k !== 'bits' && k !== 'boost' && stream) {
+      // the camera restarts for these; hold the choices still until it has
+      const rows = [el.optCam, el.optRes, el.optFps];
+      rows.forEach((r) => r.classList.add('busy'));
       el.optNow.textContent = 'Applying…';
-      await startCamera();
-      renderOptions();
+      try { await startCamera(); }
+      finally { rows.forEach((r) => r.classList.remove('busy')); renderOptions(); }
     }
   });
 
