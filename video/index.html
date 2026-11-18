@@ -37,9 +37,9 @@
 }
 
 * { box-sizing: border-box; }
-/* Space for the status bar. Since iOS 26.1 a Home Screen web app can start below the status bar while still
-   reporting the status-bar height, which doubled the gap at the top; the script below sets this to 0 then. */
-:root { --safe-top: env(safe-area-inset-top, 0px); }
+/* Space for the status bar. Some iOS versions report about twice the real status-bar height to Home Screen
+   web apps (which left a thick black band at the top), so it is capped at the tallest real one (iPhone Pro, ~60 pt). */
+:root { --safe-top: min(env(safe-area-inset-top, 0px), 60px); }
 html, body { height: 100%; margin: 0; }
 body {
   display: flex; flex-direction: column; overflow: hidden;
@@ -132,7 +132,7 @@ svg { display: block; }
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
   font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
 }
-.vf-info:empty { display: none; }
+.vf-info:empty, .vf-info.away { display: none; }
 .viewfinder { cursor: pointer; }
 /* Zoom dial: drag up to zoom in, down to zoom out; tap to go back to 1× */
 .zoom-dial {
@@ -1308,6 +1308,7 @@ svg { display: block; }
     el.rec.setAttribute('aria-label', 'Stop recording');
     el.timer.classList.add('on');
     el.recBadge.hidden = false;
+    el.vfInfo.classList.add('away');   // only the timer at the top while recording, as in the Camera app
     el.flipBtn.hidden = true;
     el.lensBtn.hidden = true;
     el.newBtn.disabled = true;
@@ -1325,6 +1326,7 @@ svg { display: block; }
     el.rec.setAttribute('aria-label', 'Start recording');
     el.timer.classList.remove('on');
     el.recBadge.hidden = true;
+    el.vfInfo.classList.remove('away');
     try { recorder.stop(); } catch (err) { finishBusy(); }
     if (wake) { wake.release().catch(() => {}); wake = null; }
   }
@@ -3102,16 +3104,6 @@ svg { display: block; }
   window.addEventListener('beforeunload', (e) => {
     if (clips.length || recording) { e.preventDefault(); e.returnValue = ''; }
   });
-
-  // Does the page reach under the status bar? If it already starts below it, the top needs no extra space.
-  function fitTop() {
-    const long = Math.max(screen.width, screen.height), tall = Math.max(window.innerWidth, window.innerHeight);
-    const under = long - tall < 6;
-    document.documentElement.style.setProperty('--safe-top', under ? 'env(safe-area-inset-top, 0px)' : '0px');
-  }
-  fitTop();
-  window.addEventListener('resize', fitTop);
-  window.addEventListener('orientationchange', () => setTimeout(fitTop, 300));
 
   if (!canRecord) setMode('phone');
   render();
