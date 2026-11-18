@@ -191,11 +191,24 @@ svg { display: block; }
   flex: none; position: relative;
   padding: 6px 0 calc(10px + env(safe-area-inset-bottom, 0px));
 }
-.dock-row { max-width: 640px; margin: 0 auto; padding: 0 20px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
-.dock-left { justify-self: start; display: flex; flex-direction: column; gap: 4px; }
-#timer { font-size: 17px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--muted); }
+.dock-meter { display: flex; align-items: center; justify-content: center; gap: 10px; height: 26px; margin: 0 auto 6px; }
+.dock-row { max-width: 640px; margin: 0 auto; padding: 0 24px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+#timer { min-width: 6.2ch; text-align: right; font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--muted); }
 #timer.on { color: var(--rec); }
-#meter { width: 88px; height: 18px; display: block; }
+#meter { width: 132px; height: 26px; display: block; }
+.side-btn {
+  justify-self: center; display: flex; flex-direction: column; align-items: center; gap: 5px;
+  border: none; background: none; padding: 2px 6px;
+  font-size: 12px; font-weight: 500; color: var(--muted);
+}
+.side-icon {
+  position: relative; width: 50px; height: 50px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--fill); color: var(--ink);
+}
+.side-icon svg { width: 22px; height: 22px; }
+.side-btn.join:not(:disabled) .side-icon { background: var(--accent); color: #fff; }
+.side-btn.join:not(:disabled) { color: var(--ink); }
+.side-btn:disabled { opacity: 0.4; }
 .rec {
   width: 74px; height: 74px; border-radius: 50%;
   border: 4px solid #fff; background: transparent;
@@ -206,16 +219,8 @@ svg { display: block; }
 .rec:active span { transform: scale(0.92); }
 .rec.on span { width: 28px; height: 28px; border-radius: 6px; }
 .rec.busy, .rec:disabled { opacity: 0.4; }
-.join-btn {
-  justify-self: end; position: relative;
-  display: flex; align-items: center; gap: 6px;
-  border: none; border-radius: 22px; padding: 11px 16px 11px 14px;
-  background: var(--accent); color: #fff; font-size: 17px; font-weight: 600;
-}
-.join-btn svg { width: 19px; height: 19px; }
-.join-btn:disabled { background: var(--fill); color: var(--faint); }
 #badge {
-  position: absolute; top: -6px; right: -6px;
+  position: absolute; top: -4px; right: -6px;
   min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
   background: var(--rec); color: #fff; font-size: 12px; font-weight: 600; line-height: 20px; text-align: center;
   box-shadow: 0 0 0 2px var(--bg);
@@ -376,7 +381,7 @@ svg { display: block; }
 <body>
 
 <header class="navbar">
-  <button id="newBtn" class="nav-btn" type="button" aria-label="Start a new recording">New</button>
+  <span></span>
   <h1 class="nav-title">VO Camera</h1>
   <button id="optBtn" class="nav-btn icon right" type="button" aria-label="Video options">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>
@@ -413,15 +418,19 @@ svg { display: block; }
 </section>
 
 <footer class="dock" id="dock">
+  <div class="dock-meter">
+    <output id="timer" aria-label="Recording time">00:00.0</output>
+    <canvas id="meter" aria-hidden="true"></canvas>
+  </div>
   <div class="dock-row">
-    <div class="dock-left">
-      <output id="timer" aria-label="Recording time">00:00.0</output>
-      <canvas id="meter" aria-hidden="true"></canvas>
-    </div>
+    <button id="newBtn" class="side-btn" type="button" aria-label="Start a new recording">
+      <span class="side-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+      New
+    </button>
     <button id="rec" class="rec" type="button" aria-label="Start recording"><span></span></button>
-    <button id="join" class="join-btn" type="button" disabled>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="7" height="12" rx="2"/><rect x="14" y="6" width="7" height="12" rx="2"/></svg>
-      Join<span id="badge" hidden>0</span>
+    <button id="join" class="side-btn join" type="button" disabled>
+      <span class="side-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="7" height="12" rx="2"/><rect x="14" y="6" width="7" height="12" rx="2"/></svg><span id="badge" hidden>0</span></span>
+      Join
     </button>
   </div>
 </footer>
@@ -588,6 +597,28 @@ svg { display: block; }
   const short = (s) => Math.floor(s / 60) + ':' + pad(Math.floor(s % 60));
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Haptic feedback. Android: vibrate(). iPhone (iOS 18+): toggling a hidden iOS-style switch plays the system haptic tick.
+  const hapticLabel = (() => {
+    try {
+      const lab = document.createElement('label');
+      lab.setAttribute('aria-hidden', 'true');
+      lab.style.cssText = 'position:fixed;left:-100px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+      const inp = document.createElement('input');
+      inp.type = 'checkbox'; inp.setAttribute('switch', ''); inp.tabIndex = -1;
+      lab.appendChild(inp);
+      document.body.appendChild(lab);
+      return lab;
+    } catch (err) { return null; }
+  })();
+  function haptic(kind) {
+    try {
+      if (navigator.vibrate) { navigator.vibrate(kind === 'heavy' ? 30 : kind === 'double' ? [12, 60, 12] : 12); return; }
+      if (!hapticLabel) return;
+      hapticLabel.click();
+      if (kind === 'double' || kind === 'heavy') setTimeout(() => hapticLabel.click(), 90);
+    } catch (err) {}
+  }
 
   // Messages float over the picture for a few seconds, like iOS banners; ones that need action stay
   let statusTimer = 0;
@@ -971,6 +1002,7 @@ svg { display: block; }
 
   el.startCam.addEventListener('click', () => { audioCtx(); startCamera(); });
   el.flipBtn.addEventListener('click', () => {
+    haptic();
     if (recording || busy) return;
     facing = facing === 'user' ? 'environment' : 'user';
     lensIndex = 0;
@@ -978,6 +1010,7 @@ svg { display: block; }
     startCamera();
   });
   el.lensBtn.addEventListener('click', () => {
+    haptic();
     if (recording || busy || lenses.length < 2) return;
     lensIndex = (lensIndex + 1) % lenses.length;
     startCamera();
@@ -1019,6 +1052,7 @@ svg { display: block; }
     if (e.target === el.optBack) { closeOptions(); return; }
     const b = e.target.closest('[data-k]');
     if (!b || starting) return;
+    haptic();
     const k = b.dataset.k, v = b.dataset.v;
     if (k === 'res') settings.res = v;
     else if (k === 'fps') settings.fps = Number(v);
@@ -1059,6 +1093,8 @@ svg { display: block; }
     recorder.onerror = (e) => setStatus('Recording hit an error (' + ((e && e.error && e.error.name) || 'unknown') + '). Try a lower resolution in video options.');
     recorder.onstop = () => addClip(new Blob(chunks, { type: recorder.mimeType || type || 'video/mp4' }));
     recording = true;
+    pulse.length = 0;
+    haptic('heavy');
     recStart = performance.now();
     el.rec.classList.add('on');
     el.rec.setAttribute('aria-label', 'Stop recording');
@@ -1073,6 +1109,7 @@ svg { display: block; }
   }
 
   function stopRecording() {
+    haptic('heavy');
     recording = false;
     busy = true;
     el.rec.classList.remove('on');
@@ -1222,6 +1259,7 @@ svg { display: block; }
     el.toast.hidden = true;
   }
   function discard(clip) {
+    haptic();
     emptyTrash();
     const index = clips.indexOf(clip);
     clips.splice(index, 1);
@@ -1232,6 +1270,7 @@ svg { display: block; }
     render();
   }
   el.undo.addEventListener('click', () => {
+    haptic();
     if (!trash) return;
     clearTimeout(trashTimer);
     clips.splice(Math.min(trash.index, clips.length), 0, trash.clip);
@@ -1284,6 +1323,7 @@ svg { display: block; }
     if (e.target === el.gapBack) { closeGapSheet(); return; }
     const b = e.target.closest('[data-gap]');
     if (!b) return;
+    haptic();
     const v = b.dataset.gap;
     gapSeconds = v === 'natural' ? 'natural' : parseFloat(v);
     try { localStorage.setItem('vc-gap', String(gapSeconds)); } catch (err) {}
@@ -1357,6 +1397,7 @@ svg { display: block; }
   }
 
   function closeEditor(save) {
+    if (save) haptic();
     if (!edit) return;
     stopPreview();
     const { clip, tile, camWasOn } = edit;
@@ -2446,6 +2487,7 @@ svg { display: block; }
     }
     joined = blob;
     unsaved = false;
+    haptic('double');
     el.joinBar.style.width = '100%';
     el.joinTitle.textContent = 'Your video is ready';
     el.joinText.textContent = clock(joinedSeconds()) + ' long, ' + (blob.size / 1048576).toFixed(1) + ' MB. ' +
@@ -2489,6 +2531,7 @@ svg { display: block; }
   el.cancelBtn.addEventListener('click', () => { el.sheetBack.hidden = true; });
   el.sheetBack.addEventListener('click', (e) => { if (e.target === el.sheetBack) el.sheetBack.hidden = true; });
   el.clearBtn.addEventListener('click', () => {
+    haptic('heavy');
     el.sheetBack.hidden = true;
     emptyTrash();
     clips.forEach((c) => URL.revokeObjectURL(c.url));
@@ -2498,10 +2541,12 @@ svg { display: block; }
     render();
   });
 
-  /* ---------- live level meter and timer ---------- */
-  const history = [];
-  let frame = 0;
-  const colors = (() => { const s = getComputedStyle(document.documentElement); return { rec: s.getPropertyValue('--rec').trim(), idle: s.getPropertyValue('--line').trim() }; })();
+  /* ---------- live level line and timer ---------- */
+  // Before anything is recorded: nothing moves. Camera on but not recording: a flat line.
+  // Recording: a red heartbeat trace that scrolls and beats with the voice.
+  const pulse = [];
+  let frame = 0, meterDrawn = '';
+  const colors = (() => { const s = getComputedStyle(document.documentElement); return { rec: s.getPropertyValue('--rec').trim(), idle: s.getPropertyValue('--faint').trim() }; })();
   function tick() {
     requestAnimationFrame(tick);
     if (recording) {
@@ -2511,23 +2556,50 @@ svg { display: block; }
     }
     const cv = el.meter, dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
     if (!w) return;
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const sized = cv.width === Math.round(w * dpr) && cv.height === Math.round(h * dpr);
+    if (!sized) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); meterDrawn = ''; }
+    const g = cv.getContext('2d');
+    const mid = h / 2;
+    if (!recording) {
+      // still: draw once and leave it (flat line when the camera is on, nothing at all before it is)
+      const want = stream ? 'flat' : 'none';
+      if (meterDrawn === want) return;
+      meterDrawn = want;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      if (want === 'flat') {
+        g.strokeStyle = colors.idle; g.lineWidth = 1.5; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(1, mid); g.lineTo(w - 1, mid); g.stroke();
+      }
+      return;
+    }
+    meterDrawn = 'live';
     let level = 0;
     if (analyser && stream && stream.active) {
       analyser.getFloatTimeDomainData(levelData);
       for (let i = 0; i < levelData.length; i++) { const v = Math.abs(levelData[i]); if (v > level) level = v; }
-      level = Math.min(1, level * 1.6);
+      level = Math.min(1, Math.sqrt(level) * 1.3);   // speech is quiet; the square root makes it read clearly
     }
-    if (++frame % 3 === 0) { history.push(level); if (history.length > 400) history.shift(); }
-    const g = cv.getContext('2d');
+    if (++frame % 2 === 0) {
+      // each new point is a small heartbeat shape whose height follows the voice: up, down, back to the line
+      const amp = level < 0.04 ? 0 : level;
+      const s = pulse.length % 4;
+      pulse.push(s === 1 ? amp : s === 2 ? -amp * 0.6 : s === 3 ? amp * 0.25 : 0);
+      if (pulse.length > 200) pulse.shift();
+    }
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
-    g.fillStyle = recording ? colors.rec : colors.idle;
-    const step = 5, count = Math.floor(w / step);
-    for (let i = 0; i < count; i++) {
-      const v = history[history.length - 1 - i] || 0, bh = Math.max(3, v * (h - 4));
-      g.fillRect(w - (i + 1) * step + 1, (h - bh) / 2, 3, bh);
-    }
+    const step = 3, count = Math.min(pulse.length, Math.floor(w / step));
+    g.strokeStyle = colors.rec; g.lineWidth = 2; g.lineJoin = 'round'; g.lineCap = 'round';
+    g.shadowColor = colors.rec; g.shadowBlur = 6;
+    g.beginPath();
+    g.moveTo(w - 1, mid - (pulse[pulse.length - 1] || 0) * (mid - 2));
+    for (let i = 1; i < count; i++) g.lineTo(w - 1 - i * step, mid - pulse[pulse.length - 1 - i] * (mid - 2));
+    if (count * step < w) g.lineTo(1, mid);
+    g.stroke();
+    g.shadowBlur = 0;
+    g.fillStyle = colors.rec;
+    g.beginPath(); g.arc(w - 2.5, mid - (pulse[pulse.length - 1] || 0) * (mid - 2), 2.5, 0, Math.PI * 2); g.fill();
   }
   requestAnimationFrame(tick);
 
