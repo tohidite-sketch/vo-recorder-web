@@ -1335,6 +1335,45 @@ svg { display: block; }
     el.timer.textContent = '00:00.0';
   }
 
+  // Turn a recorded file into a take: read its sound (for the trim and the waveform), find where the voice is.
+  // 'saved' is what was kept about it last time, when a take is being brought back after the app was closed.
+  async function buildClip(blob, saved) {
+    const url = URL.createObjectURL(blob);
+    let audio = null;
+    try {
+      const buf = await blob.arrayBuffer();
+      audio = await new Promise((res, rej) => audioCtx().decodeAudioData(buf, res, rej));
+    } catch (err) { audio = null; }
+    if (!audio && window.AudioDecoder) {
+      try {
+        await loadLibs();
+        const p = await demux(await blob.arrayBuffer());
+        if (p.aac) audio = await decodeAacPackets(p.aac);
+      } catch (err) { audio = null; }
+    }
+    let dur = audio ? audio.duration : (saved && saved.dur) || 0;
+    if (!dur) { const v = await loadVideo(url); dur = await realDuration(v); dropVideo(v); }
+    if (dur < 0.4 && !saved) { URL.revokeObjectURL(url); return null; }
+    const clip = { id: saved ? saved.id : nextId++, blob, url, type: blob.type || (saved && saved.type) || '', dur,
+      hue: saved ? saved.hue : HUES[hueIndex++ % HUES.length], manual: saved ? saved.manual || null : null, thumb: null, thumbKey: -1 };
+    // The full decoded sound is large (a long day of takes would fill the phone's memory), so only a compact
+    // mono copy is kept for trimming; the full sound is read again from the file when you join.
+    clip.audio = null;
+    clip.hasSound = !!audio;
+    if (audio) {
+      clip.rate = audio.sampleRate;
+      clip.pcm = toPcm16(audio);
+      clip.len = clip.pcm.length;
+      const auto = detectVoice(clip.pcm, clip.rate);
+      clip.autoS = auto[0]; clip.autoE = auto[1];
+    } else {
+      // No readable sound: work in milliseconds so trimming still works by eye
+      clip.pcm = null; clip.rate = 1000; clip.len = Math.round(dur * 1000);
+      clip.autoS = 0; clip.autoE = clip.len;
+    }
+    return clip;
+  }
+
   async function addClip(blob) {
     busy = true;
     el.rec.classList.add('busy');
@@ -1345,40 +1384,13 @@ svg { display: block; }
       return;
     }
     try {
-      const url = URL.createObjectURL(blob);
-      let audio = null;
-      try {
-        const buf = await blob.arrayBuffer();
-        audio = await new Promise((res, rej) => audioCtx().decodeAudioData(buf, res, rej));
-      } catch (err) { audio = null; }
-      if (!audio && window.AudioDecoder) {
-        try {
-          await loadLibs();
-          const p = await demux(await blob.arrayBuffer());
-          if (p.aac) audio = await decodeAacPackets(p.aac);
-        } catch (err) { audio = null; }
-      }
-      let dur = audio ? audio.duration : 0;
-      if (!dur) { const v = await loadVideo(url); dur = await realDuration(v); dropVideo(v); }
-      if (dur < 0.4) { URL.revokeObjectURL(url); setStatus('That one was too short to keep.'); finishBusy(); return; }
-      const clip = { id: nextId++, blob, url, type: blob.type, dur, hue: HUES[hueIndex++ % HUES.length], manual: null, thumb: null, thumbKey: -1 };
-      if (audio) {
-        clip.audio = audio;
-        clip.rate = audio.sampleRate;
-        clip.pcm = toPcm16(audio);
-        clip.len = clip.pcm.length;
-        const auto = detectVoice(clip.pcm, clip.rate);
-        clip.autoS = auto[0]; clip.autoE = auto[1];
-      } else {
-        // No readable sound: work in milliseconds so trimming still works by eye
-        clip.audio = null; clip.pcm = null; clip.rate = 1000; clip.len = Math.round(dur * 1000);
-        clip.autoS = 0; clip.autoE = clip.len;
-      }
+      const clip = await buildClip(blob, null);
+      if (!clip) { setStatus('That one was too short to keep.'); finishBusy(); return; }
       clips.push(clip);
       unsaved = true;
       freshId = clip.id;
       const cut = (clip.len - (clip.autoE - clip.autoS)) / clip.rate;
-      setStatus(!clip.audio
+      setStatus(!clip.hasSound
         ? 'Take ' + clips.length + ' saved, but its sound could not be read. Check that the microphone is allowed.'
         : !isNatural() && cut >= 0.1
         ? 'Take ' + clips.length + ': ' + cut.toFixed(1) + ' s of silence will be trimmed. Tap it to adjust.'
@@ -1386,10 +1398,119 @@ svg { display: block; }
       render();
       el.list.scrollTo({ left: el.list.scrollWidth, behavior: 'smooth' });
       makeThumb(clip);
+      await keepTake(clip);
     } catch (err) {
       setStatus('That take could not be saved. Please record it again.');
     }
     finishBusy();
+  }
+
+  /* ---------- keeping takes safe on the phone ---------- */
+  // Every take is written to this app's own storage on the iPhone (IndexedDB) the moment it is recorded,
+  // so closing the app, a crash or restarting the phone loses nothing. Takes stay until you tap New.
+  const store = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('vo-camera', 1);
+      r.onupgradeneeded = () => { r.result.createObjectStore('blobs'); r.result.createObjectStore('meta'); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => { dbp = null; rej(r.error); };
+    }));
+    const run = async (name, mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction(name, mode), q = fn(t.objectStore(name));
+        let out;
+        if (q) q.onsuccess = () => { out = q.result; };
+        t.oncomplete = () => res(out);
+        t.onerror = () => rej(t.error);
+        t.onabort = () => rej(t.error || new Error('storage refused'));
+      });
+    };
+    return {
+      putBlob: (id, blob) => run('blobs', 'readwrite', (st) => st.put(blob, id)),
+      getBlob: (id) => run('blobs', 'readonly', (st) => st.get(id)),
+      delBlob: (id) => run('blobs', 'readwrite', (st) => st.delete(id)),
+      keys: () => run('blobs', 'readonly', (st) => st.getAllKeys()),
+      putMeta: (v) => run('meta', 'readwrite', (st) => st.put(v, 'takes')),
+      getMeta: () => run('meta', 'readonly', (st) => st.get('takes')),
+      clear: () => Promise.all([run('blobs', 'readwrite', (st) => st.clear()), run('meta', 'readwrite', (st) => st.clear())]),
+    };
+  })();
+  let storeOk = !!window.indexedDB, storeWarned = false;
+  // ask the phone not to clear this app's storage when space runs low
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (err) {}
+  function saveList() {
+    if (!storeOk) return Promise.resolve();
+    const list = clips.map((c) => ({ id: c.id, type: c.type, dur: c.dur, hue: c.hue, manual: c.manual }));
+    return store.putMeta({ list, nextId, hueIndex }).catch(() => {});
+  }
+  function storeFailed(err) {
+    if (storeWarned) return;
+    storeWarned = true;
+    setStatus('This take could not be kept on the phone' + (err && err.name === 'QuotaExceededError' ? ' because its storage is full' : '') +
+      '. It is still here for now: join and save soon so nothing is lost.');
+  }
+  async function keepTake(clip) {
+    if (!storeOk) { storeFailed(); return; }
+    try {
+      await store.putBlob(clip.id, clip.blob);
+      await saveList();
+      // From now on use the copy in storage: the phone keeps it on its disk instead of in memory,
+      // which is what lets a long day of takes fit without the app being shut down
+      const disk = await store.getBlob(clip.id);
+      if (disk && disk.size === clip.blob.size && clips.includes(clip)) {
+        await disk.slice(0, 16).arrayBuffer();          // make sure it reads back
+        const old = clip.url;
+        clip.blob = disk;
+        clip.url = URL.createObjectURL(disk);
+        setTimeout(() => URL.revokeObjectURL(old), 8000);
+      }
+      clip.kept = true;
+      if (navigator.storage && navigator.storage.estimate) {
+        const e = await navigator.storage.estimate();
+        if (e.quota && e.usage / e.quota > 0.9) setStatus('The phone storage for this app is nearly full. Join and save your takes soon, then tap New.');
+      }
+    } catch (err) { storeFailed(err); }
+  }
+  // When the app opens, bring back the takes from last time
+  async function restoreTakes() {
+    if (!storeOk) return;
+    let meta;
+    try { meta = await store.getMeta(); } catch (err) { storeOk = false; return; }
+    const list = (meta && meta.list) || [];
+    try {
+      const want = new Set(list.map((m) => m.id));
+      for (const k of await store.keys()) if (!want.has(k)) store.delBlob(k).catch(() => {});   // leftovers of discarded takes
+    } catch (err) {}
+    if (!list.length) return;
+    nextId = Math.max(nextId, meta.nextId || 1, ...list.map((m) => m.id + 1));
+    hueIndex = meta.hueIndex || list.length;
+    busy = true;
+    el.rec.classList.add('busy');
+    el.newBtn.disabled = true;
+    let lost = 0;
+    for (let i = 0; i < list.length; i++) {
+      setStatus('Bringing back your takes: ' + (i + 1) + ' of ' + list.length + '…');
+      try {
+        const blob = await store.getBlob(list[i].id);
+        const clip = blob && blob.size ? await buildClip(blob, list[i]) : null;
+        if (!clip) { lost++; continue; }
+        clip.kept = true;
+        clips.push(clip);
+        render();
+        makeThumb(clip);
+      } catch (err) { lost++; }
+    }
+    unsaved = clips.length > 0;
+    await saveList();
+    finishBusy();
+    render();
+    if (clips.length) el.list.scrollTo({ left: el.list.scrollWidth });
+    setStatus(clips.length
+      ? (clips.length === 1 ? 'Your take from last time is back.' : 'Your ' + clips.length + ' takes from last time are back.') +
+        (lost ? ' ' + lost + ' could not be read.' : '') + ' Keep recording, or tap Join.'
+      : 'Your takes from last time could not be read.');
   }
 
   /* ---------- takes ---------- */
@@ -1417,7 +1538,7 @@ svg { display: block; }
     el.list.innerHTML = '';
     if (!clips.length) {
       el.list.innerHTML = '<li class="tile-ghost" aria-hidden="true">' + ICON.cam + '</li>' +
-        '<li class="ghost-text">Each take lands here. Tap one to trim it, ✕ to drop it.</li>';
+        '<li class="ghost-text">Each take lands here and is kept on this iPhone, even if the app closes, until you tap New. Tap one to trim it, ✕ to drop it.</li>';
     }
     clips.forEach((c, i) => {
       const n = i + 1, d = usedSeconds(c);
@@ -1460,7 +1581,7 @@ svg { display: block; }
 
   function emptyTrash() {
     clearTimeout(trashTimer);
-    if (trash) { URL.revokeObjectURL(trash.clip.url); trash = null; }
+    if (trash) { URL.revokeObjectURL(trash.clip.url); if (storeOk) store.delBlob(trash.clip.id).catch(() => {}); trash = null; }
     el.toast.hidden = true;
   }
   function discard(clip) {
@@ -1473,6 +1594,7 @@ svg { display: block; }
     el.toast.hidden = false;
     trashTimer = setTimeout(emptyTrash, 6000);
     render();
+    saveList();
   }
   el.undo.addEventListener('click', () => {
     haptic();
@@ -1482,6 +1604,7 @@ svg { display: block; }
     trash = null;
     el.toast.hidden = true;
     render();
+    saveList();
   });
 
   /* ---------- saving files ---------- */
@@ -1613,6 +1736,7 @@ svg { display: block; }
       const after = clip.manual ? clip.manual.join(':') : 'auto';
       if (before !== after) {
         unsaved = true;
+        saveList();
         message = 'Take ' + (clips.indexOf(clip) + 1) + (clip.manual ? ' trimmed to ' : ' back to auto trim: ') + usedSeconds(clip).toFixed(2) + ' s.';
       }
     }
@@ -2337,6 +2461,11 @@ svg { display: block; }
     // Sound: copy the recorded AAC straight across when every take has it (no re-encoding, works on older iPhones);
     // otherwise encode it, which needs iOS 26 or a recent desktop browser
     for (let i = 0; i < clips.length; i++) {
+      if (!clips[i].audio && clips[i].hasSound) {
+        el.joinText.textContent = 'Reading the sound of take ' + (i + 1) + ' of ' + clips.length + '…';
+        try { const buf = await clips[i].blob.arrayBuffer(); clips[i].audio = await new Promise((res, rej) => audioCtx().decodeAudioData(buf, res, rej)); }
+        catch (err) { clips[i].audio = null; }
+      }
       if (!clips[i].audio && parsed[i].aac) {
         try { clips[i].audio = await decodeAacPackets(parsed[i].aac); jlog('take ' + (i + 1) + ': sound read from its AAC frames'); }
         catch (err) { jlog('take ' + (i + 1) + ': sound could not be decoded (' + describe(err) + ')'); }
@@ -2681,6 +2810,7 @@ svg { display: block; }
     } else {
       why = 'this browser is missing the frame-by-frame video tools; updating iOS adds them';
     }
+    clips.forEach((c) => { c.audio = null; });   // let go of the full sound again until the next join
     if (joinCancelled) { finishJoin(null, ''); return; }
     if (!blob) { joinFailed(why); return; }
     finishJoin(blob, '');
@@ -2826,7 +2956,7 @@ svg { display: block; }
     if (recording || busy || joining) return;
     if (!clips.length) { setStatus('Already a fresh start. Tap record when you are ready.'); return; }
     el.sheetText.textContent = (clips.length === 1 ? 'Your 1 take' : 'All ' + clips.length + ' takes') + ' will be removed.' +
-      (unsaved ? " You haven't joined and saved them yet." : '');
+      (unsaved ? " You haven't joined and saved them yet." : '') + ' They will also be deleted from this iPhone.';
     el.sheetBack.hidden = false;
     el.clearBtn.focus();
   }
@@ -2840,6 +2970,7 @@ svg { display: block; }
     clips.forEach((c) => URL.revokeObjectURL(c.url));
     clips.length = 0;
     hueIndex = 0; unsaved = false;
+    if (storeOk) store.clear().catch(() => {});
     setStatus('Fresh start.');
     render();
   });
@@ -2971,6 +3102,7 @@ svg { display: block; }
 
   if (!canRecord) setMode('phone');
   render();
+  restoreTakes();
 })();
 </script>
 </body>
