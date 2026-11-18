@@ -114,7 +114,7 @@ svg { display: block; }
 .vf-btn[hidden] { display: none; }
 .vf-btn svg { width: 21px; height: 21px; }
 #flipBtn { right: 12px; }
-#lensBtn { left: 50%; transform: translateX(-50%); width: 38px; height: 38px; font-size: 13px; font-weight: 600; color: var(--yellow); }
+#lensBtn { left: 12px; width: 38px; height: 38px; font-size: 13px; font-weight: 600; color: var(--yellow); }
 .rec-badge {
   position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
   padding: 3px 9px; border-radius: 6px;
@@ -131,6 +131,29 @@ svg { display: block; }
 }
 .vf-info:empty { display: none; }
 .viewfinder { cursor: pointer; }
+/* Zoom dial: drag up to zoom in, down to zoom out; tap to go back to 1× */
+.zoom-dial {
+  position: absolute; left: 50%; bottom: 8px; width: 56px; height: 56px; margin-left: -28px;
+  border-radius: 50%; border: 1.5px solid rgba(255, 214, 10, 0.9); padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0;
+  background: rgba(0, 0, 0, 0.45); color: var(--yellow);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  touch-action: none; -webkit-user-select: none; user-select: none;
+  transition: transform 0.18s ease, background-color 0.18s ease;
+}
+.zoom-dial[hidden] { display: none; }
+.zoom-dial.off { border-color: rgba(255, 255, 255, 0.35); color: rgba(255, 255, 255, 0.5); }
+.zoom-dial .chev { width: 12px; height: 7px; opacity: 0.75; }
+.zoom-dial b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+#zoomDial.active, #zoomDial:active { opacity: 1; }
+.zoom-dial.active { transform: scale(1.18); background: rgba(0, 0, 0, 0.6); border-width: 2px; }
+.zoom-track {
+  position: absolute; left: 50%; bottom: 74px; width: 6px; height: 120px; margin-left: -3px;
+  border-radius: 3px; background: rgba(255, 255, 255, 0.25); overflow: hidden;
+  opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+}
+.zoom-track.show { opacity: 1; }
+.zoom-track i { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: var(--yellow); border-radius: 3px; }
 
 /* Takes strip */
 .strip { flex: none; padding: 12px 0 8px; }
@@ -415,6 +438,12 @@ svg { display: block; }
     <div class="rec-badge" id="recBadge" hidden><span id="badgeTime">0:00</span></div>
     <span class="vf-info" id="vfInfo"></span>
     <button class="vf-btn" id="lensBtn" type="button" aria-label="Switch lens" hidden>1×</button>
+    <div class="zoom-track" id="zoomTrack" aria-hidden="true"><i id="zoomFill"></i></div>
+    <button class="zoom-dial" id="zoomDial" type="button" aria-label="Zoom. Drag up to zoom in, down to zoom out. Tap to go back to 1×." hidden>
+      <svg class="chev" viewBox="0 0 12 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 6l5-5 5 5"/></svg>
+      <b id="zoomText">1×</b>
+      <svg class="chev" viewBox="0 0 12 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1l5 5 5-5"/></svg>
+    </button>
     <button class="vf-btn" id="flipBtn" type="button" aria-label="Switch between front and back camera" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 9.5A7.5 7.5 0 0 0 6 7.2L4.5 8.7"/><path d="M4.5 4.5v4.2h4.2"/><path d="M4.5 14.5A7.5 7.5 0 0 0 18 16.8l1.5-1.5"/><path d="M19.5 19.5v-4.2h-4.2"/></svg>
     </button>
@@ -552,7 +581,7 @@ svg { display: block; }
   'use strict';
   const $ = (id) => document.getElementById(id);
   const el = {
-    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'), viewfinder: document.querySelector('.viewfinder'),
+    live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), zoomDial: $('zoomDial'), zoomText: $('zoomText'), zoomTrack: $('zoomTrack'), zoomFill: $('zoomFill'), vfInfo: $('vfInfo'), viewfinder: document.querySelector('.viewfinder'),
     optBtn: $('optBtn'), gapBack: $('gapBack'), gapList: $('gapList'), gapCancel: $('gapCancel'),
     optBack: $('optBack'), optNow: $('optNow'), optCam: $('optCam'), optRes: $('optRes'), optFps: $('optFps'), optBit: $('optBit'), optBoost: $('optBoost'), optDone: $('optDone'),
     recBadge: $('recBadge'), badgeTime: $('badgeTime'),
@@ -1009,6 +1038,7 @@ svg { display: block; }
     }
     activeRes = used ? used.id : null;
     await widest(stream.getVideoTracks()[0]);
+    setupZoom();
     el.live.onloadedmetadata = showInfo;
     el.live.onresize = showInfo;
     el.camOff.hidden = true;
@@ -1033,7 +1063,91 @@ svg { display: block; }
     el.live.srcObject = null;
     el.vfInfo.textContent = '';
     el.lensBtn.hidden = true;
+    el.zoomDial.hidden = true;
+    zoomCaps = null;
   }
+
+  /* ---------- zoom ---------- */
+  // The camera's own zoom, so the recorded video is zoomed too (not just the picture on screen)
+  let zoomCaps = null, zoomNow = 1, zoomWant = null, zoomBusy = false;
+  const zoomLabel = (z) => (Math.round(z * 10) / 10).toString().replace(/\.0$/, '') + '×';
+  function setupZoom() {
+    const t = stream && stream.getVideoTracks()[0];
+    let c = {};
+    try { c = t && t.getCapabilities ? t.getCapabilities() : {}; } catch (err) {}
+    if (c.zoom && c.zoom.max > c.zoom.min) {
+      // past about 10× the picture is only blown-up pixels, so the dial stops there
+      zoomCaps = { min: c.zoom.min, max: Math.min(c.zoom.max, Math.max(1, c.zoom.min) * 10) };
+      let z = zoomCaps.min;
+      try { z = t.getSettings().zoom || z; } catch (err) {}
+      zoomNow = z;
+      el.zoomDial.classList.remove('off');
+    } else {
+      zoomCaps = null; zoomNow = 1;
+      el.zoomDial.classList.add('off');
+    }
+    el.zoomDial.hidden = !t;
+    showZoom();
+  }
+  function showZoom() {
+    el.zoomText.textContent = zoomLabel(zoomNow);
+    if (zoomCaps) {
+      const f = Math.log(zoomNow / zoomCaps.min) / Math.log(zoomCaps.max / zoomCaps.min);
+      el.zoomFill.style.height = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%';
+    }
+  }
+  // one zoom change at a time (iPhone can stall if asked for several at once); the newest wins
+  function applyZoom(z) {
+    zoomWant = z;
+    if (zoomBusy) return;
+    zoomBusy = true;
+    (async () => {
+      while (zoomWant != null) {
+        const w = zoomWant; zoomWant = null;
+        const t = stream && stream.getVideoTracks()[0];
+        if (!t) break;
+        try { await Promise.race([t.applyConstraints({ advanced: [{ zoom: w }] }), sleep(800)]); } catch (err) {}
+      }
+      zoomBusy = false;
+    })();
+  }
+  (() => {
+    const d = el.zoomDial;
+    let id = null, y0 = 0, z0 = 1, moved = false;
+    d.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      id = e.pointerId; y0 = e.clientY; z0 = zoomNow; moved = false;
+      try { d.setPointerCapture(id); } catch (err) {}
+      if (!zoomCaps) return;
+      d.classList.add('active'); el.zoomTrack.classList.add('show');
+    });
+    d.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== id || !zoomCaps) return;
+      const dy = y0 - e.clientY;                       // up = zoom in
+      if (!moved && Math.abs(dy) < 4) return;
+      moved = true;
+      const z = Math.max(zoomCaps.min, Math.min(zoomCaps.max, z0 * Math.pow(2, dy / 110)));   // 110 px per doubling
+      if (Math.floor(z) !== Math.floor(zoomNow) || (z === zoomCaps.max) !== (zoomNow === zoomCaps.max)) haptic();
+      zoomNow = z;
+      showZoom();
+      applyZoom(z);
+    });
+    const end = (e) => {
+      if (e.pointerId !== id) return;
+      id = null;
+      d.classList.remove('active'); el.zoomTrack.classList.remove('show');
+      if (!zoomCaps) { setStatus('This iPhone does not let web apps zoom the camera. Use the lens button to switch lenses.'); return; }
+      if (!moved) {
+        // tap: back to 1×, or to 2× if already there
+        const one = Math.max(zoomCaps.min, Math.min(zoomCaps.max, 1));
+        const z = Math.abs(zoomNow - one) < 0.05 ? Math.min(zoomCaps.max, one * 2) : one;
+        haptic(); zoomNow = z; showZoom(); applyZoom(z);
+      }
+    };
+    d.addEventListener('pointerup', end);
+    d.addEventListener('pointercancel', end);
+    d.addEventListener('click', (e) => e.stopPropagation());
+  })();
 
   function setMode(m) {
     mode = m;
