@@ -8,31 +8,30 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="VO Camera">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0f1514">
+<meta name="theme-color" content="#000000">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icon-180.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  /* Layout: camera viewfinder fills the screen, square takes scroll sideways under it, record dock at the bottom.
-     One dark theme on purpose: a camera reads best on dark surroundings. */
-  --bg: #0f1514;
-  --bg-deep: #0a0f0e;
-  --surface: #172120;
-  --ink: #e6eeec;
-  --muted: #8fa3a0;
-  --line: #273533;
-  --soft: #1e2a28;
-  --accent: #7cc6bb;
-  --on-accent: #0b2622;
-  --rec: #ff6f66;
+  /* iOS dark appearance: system colours, SF Pro (the iPhone's own font), frosted bars */
+  --bg: #000;
+  --surface: #1c1c1e;
+  --surface-2: #2c2c2e;
+  --surface-3: #3a3a3c;
+  --fill: rgba(118, 118, 128, 0.24);
+  --fill-2: rgba(118, 118, 128, 0.36);
+  --ink: #fff;
+  --muted: rgba(235, 235, 245, 0.6);
+  --faint: rgba(235, 235, 245, 0.3);
+  --separator: rgba(84, 84, 88, 0.6);
+  --accent: #0a84ff;
+  --rec: #ff453a;
+  --yellow: #ffd60a;
+  --bar-l: 70%;
   --tile-l: 22%;
-  --tile-s: 18%;
-  --bar-l: 72%;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.35);
-  --ui: "Figtree", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --tile-s: 10%;
+  --glass: rgba(22, 22, 24, 0.72);
+  --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", sans-serif;
   --dock-h: 150px;
   color-scheme: dark;
 }
@@ -42,414 +41,480 @@ html, body { height: 100%; margin: 0; }
 body {
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg); color: var(--ink);
-  font: 400 1rem/1.45 var(--ui);
+  font: 400 17px/1.3 var(--ui); letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
 }
-button { font: inherit; color: inherit; cursor: pointer; }
-button:focus-visible { outline: 2.5px solid var(--accent); outline-offset: 3px; }
+button { font: inherit; color: inherit; cursor: pointer; letter-spacing: inherit; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button:disabled { cursor: default; }
-.wrap { width: 100%; max-width: 640px; margin: 0 auto; padding: 0 16px; }
-.label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+button:active:not(:disabled) { opacity: 0.6; }
 svg { display: block; }
+.tnum { font-variant-numeric: tabular-nums; }
 
-/* Top bar */
-.top { flex: none; padding: calc(10px + env(safe-area-inset-top, 0px)) 0 6px; }
-.top .wrap { display: flex; flex-direction: column; gap: 6px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.0625rem; letter-spacing: -0.01em; }
-.brand-mark { width: 26px; height: 26px; border-radius: 9px; background: var(--accent); display: grid; place-items: center; }
-.brand-mark i { width: 10px; height: 10px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 0 2.5px var(--on-accent); }
-.status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+/* Navigation bar */
+.navbar {
+  flex: none; position: relative; z-index: 3;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  padding: calc(4px + env(safe-area-inset-top, 0px)) 8px 4px;
+  min-height: calc(44px + env(safe-area-inset-top, 0px));
+}
+.nav-title { margin: 0; font-size: 17px; font-weight: 600; text-align: center; }
+.nav-btn {
+  justify-self: start; border: none; background: none; padding: 8px 10px;
+  color: var(--accent); font-size: 17px;
+}
+.nav-btn:disabled { color: var(--faint); }
+.nav-btn.right { justify-self: end; }
+.nav-btn.icon { padding: 8px; }
+.nav-btn.icon svg { width: 24px; height: 24px; }
+.nav-btn.bold { font-weight: 600; }
+
+/* Status capsule */
+.status {
+  animation: fade 0.25s ease-out;
+  position: absolute; z-index: 4; left: 50%; transform: translateX(-50%);
+  top: calc(48px + env(safe-area-inset-top, 0px));
+  width: max-content; max-width: calc(100% - 32px);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px;
+  padding: 8px 14px; border-radius: 18px;
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+}
 .status:has(#status:empty):has(#statusBtn[hidden]) { display: none; }
-#status { margin: 0; font-size: 0.875rem; color: var(--muted); }
-#statusBtn { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 7px 14px; font-size: 0.875rem; font-weight: 600; }
+#status { margin: 0; font-size: 14px; line-height: 1.3; text-align: center; color: var(--ink); }
+#statusBtn { border: none; background: var(--fill-2); border-radius: 14px; padding: 5px 12px; font-size: 14px; font-weight: 600; color: var(--accent); }
 
 /* Viewfinder */
-.stage { flex: 1 1 auto; min-height: 200px; display: flex; padding: 4px 0 12px; }
-.stage .wrap { flex: 1; display: flex; min-height: 0; }
+.stage { flex: 1 1 auto; min-height: 180px; display: flex; padding: 0 8px; }
 .viewfinder {
-  position: relative; flex: 1; min-height: 0;
-  border-radius: 24px; overflow: hidden;
-  background: #000;
-  box-shadow: var(--shadow);
+  position: relative; flex: 1; min-height: 0; width: 100%; max-width: 640px; margin: 0 auto;
+  border-radius: 14px; overflow: hidden; background: #0d0d0e;
 }
-#live { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+#live { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #0d0d0e; }
 #live.mirror { transform: scaleX(-1); }
 .cam-off {
   position: absolute; inset: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-  text-align: center; padding: 24px; color: var(--muted);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  text-align: center; padding: 24px; color: var(--muted); font-size: 15px;
 }
 .cam-off[hidden] { display: none; }
-.cam-off svg { width: 40px; height: 40px; color: var(--accent); }
-#startCam { border: none; background: var(--accent); color: var(--on-accent); border-radius: 999px; padding: 12px 22px; font-weight: 700; }
+.cam-off svg { width: 44px; height: 44px; color: var(--faint); }
+#startCam { border: none; background: var(--accent); color: #fff; border-radius: 22px; padding: 11px 22px; font-size: 17px; font-weight: 600; }
 .vf-btn {
-  position: absolute; top: 12px;
-  width: 44px; height: 44px; border-radius: 50%; border: none; padding: 0;
+  position: absolute; bottom: 12px;
+  width: 40px; height: 40px; border-radius: 50%; border: none; padding: 0;
   display: grid; place-items: center;
-  background: rgba(0, 0, 0, 0.45); color: #fff;
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.42); color: #fff;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 }
 .vf-btn[hidden] { display: none; }
-.vf-btn svg { width: 22px; height: 22px; }
+.vf-btn svg { width: 21px; height: 21px; }
 #flipBtn { right: 12px; }
-#lensBtn { right: 64px; width: auto; min-width: 44px; padding: 0 12px; border-radius: 22px; font-weight: 700; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+#lensBtn { left: 50%; transform: translateX(-50%); width: 38px; height: 38px; font-size: 13px; font-weight: 600; color: var(--yellow); }
+.rec-badge {
+  position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+  padding: 3px 9px; border-radius: 6px;
+  background: var(--rec); color: #fff;
+  font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums;
+}
+.rec-badge[hidden] { display: none; }
 .vf-info {
-  position: absolute; left: 12px; bottom: 12px;
-  padding: 5px 10px; border-radius: 999px;
-  background: rgba(0, 0, 0, 0.5); color: #fff;
-  font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  position: absolute; left: 10px; top: 10px;
+  padding: 4px 9px; border-radius: 12px;
+  background: rgba(0, 0, 0, 0.42); color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
 }
 .vf-info:empty { display: none; }
 .viewfinder { cursor: pointer; }
-.opt-sheet { max-height: 88vh; overflow-y: auto; }
-.opt-group { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; }
-.sheet p.opt-hint { margin: 0; font-size: 0.8125rem; }
-.rec-badge {
-  position: absolute; left: 12px; top: 12px;
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 12px; border-radius: 999px;
-  background: rgba(0, 0, 0, 0.5); color: #fff;
-  font-weight: 700; font-size: 0.875rem; font-variant-numeric: tabular-nums;
-}
-.rec-badge[hidden] { display: none; }
-.rec-badge i { width: 9px; height: 9px; border-radius: 50%; background: var(--rec); animation: blink 1s steps(1) infinite; }
-@keyframes blink { 50% { opacity: 0.2; } }
 
 /* Takes strip */
-.strip { flex: none; padding: 0 0 10px; }
-.strip-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-.strip-meta { display: flex; align-items: center; gap: 10px; }
-#total { font-size: 0.8125rem; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.strip { flex: none; padding: 12px 0 8px; }
+.strip-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 16px 8px; max-width: 640px; margin: 0 auto; }
+.strip-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.strip-label { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+#total { font-size: 15px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .gap-btn {
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  border-radius: 999px; padding: 4px 11px;
-  font-size: 0.8125rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  display: flex; align-items: center; gap: 4px;
+  border: none; background: var(--fill); color: var(--accent);
+  border-radius: 16px; padding: 6px 10px 6px 12px; font-size: 15px; white-space: nowrap;
 }
+.gap-btn::after { content: ""; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); margin-left: 3px; }
 #clips {
-  list-style: none; margin: 0;
-  display: flex; gap: 10px;
+  list-style: none; margin: 0 auto; max-width: 640px;
+  display: flex; gap: 8px;
   overflow-x: auto; overflow-y: hidden;
   overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
-  scroll-padding: 0 16px;
-  padding: 2px 16px 4px;
-  scrollbar-width: none;
+  scroll-snap-type: x proximity; scroll-padding: 0 16px;
+  padding: 2px 16px 4px; scrollbar-width: none;
 }
 #clips::-webkit-scrollbar { display: none; }
-.strip-scroll { max-width: 640px; margin: 0 auto; }
 .tile {
-  --h: 168;
+  --h: 210;
   position: relative; flex: none;
-  width: 96px; aspect-ratio: 1;
-  border-radius: 18px; overflow: hidden;
+  width: 84px; aspect-ratio: 1;
+  border-radius: 10px; overflow: hidden;
   background: hsl(var(--h) var(--tile-s) var(--tile-l)) center / cover no-repeat;
   scroll-snap-align: start;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
-.tile.fresh { animation: pop 0.35s ease-out; }
-@keyframes pop { from { transform: scale(0.86); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.tile.fresh { animation: pop 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+@keyframes pop { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .tile-main {
   position: absolute; inset: 0; border: none; padding: 0;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, 0.6) 100%);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0) 38%, rgba(0, 0, 0, 0) 58%, rgba(0, 0, 0, 0.55) 100%);
   color: #fff; text-align: left;
 }
-.tile-main:active { opacity: 0.85; }
-.tile-num { position: absolute; left: 10px; top: 8px; font-size: 0.8125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.tile-dur { position: absolute; left: 10px; bottom: 8px; font-size: 0.8125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile-num { position: absolute; left: 7px; top: 5px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile-dur { position: absolute; left: 7px; bottom: 5px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tile-x, .tile-save {
-  position: absolute; width: 32px; height: 32px; border-radius: 50%;
-  border: none; padding: 0; display: grid; place-items: center; background: transparent;
+  position: absolute; width: 30px; height: 30px; border: none; padding: 0;
+  display: grid; place-items: center; background: transparent; color: #fff;
 }
-.tile-x { right: 2px; top: 2px; color: var(--rec); }
-.tile-x span { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); }
-.tile-x svg { width: 11px; height: 11px; }
-.tile-save { right: 3px; bottom: 3px; color: #fff; }
-.tile-save svg { width: 16px; height: 16px; }
+.tile-x { right: 0; top: 0; }
+.tile-x span { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+.tile-x svg { width: 9px; height: 9px; }
+.tile-save { right: 1px; bottom: 1px; }
+.tile-save svg { width: 15px; height: 15px; }
 .tile-ghost {
-  flex: none; width: 96px; aspect-ratio: 1; border-radius: 18px;
-  border: 1.5px dashed var(--line); display: grid; place-items: center; color: var(--muted);
+  flex: none; width: 84px; aspect-ratio: 1; border-radius: 10px;
+  background: var(--surface); display: grid; place-items: center; color: var(--faint);
 }
-.tile-ghost svg { width: 22px; height: 22px; opacity: 0.7; }
-.ghost-text { flex: none; align-self: center; max-width: 200px; margin: 0; font-size: 0.875rem; color: var(--muted); }
+.tile-ghost svg { width: 24px; height: 24px; }
+.ghost-text { flex: none; align-self: center; max-width: 220px; margin: 0; font-size: 13px; color: var(--muted); }
 
-/* Record dock */
+/* Bottom controls */
 .dock {
-  flex: none; background: var(--surface);
-  border-radius: 26px 26px 0 0;
-  box-shadow: 0 -1px 0 var(--line), 0 -10px 30px rgba(0, 0, 0, 0.25);
-  padding: 10px 0 calc(12px + env(safe-area-inset-bottom, 0px));
+  flex: none; position: relative;
+  padding: 6px 0 calc(10px + env(safe-area-inset-bottom, 0px));
 }
-.dock .wrap { display: flex; flex-direction: column; gap: 8px; }
-.dock-top { display: flex; align-items: center; gap: 12px; }
-#timer { flex: none; min-width: 5.6ch; font: 600 1.25rem/1 var(--ui); font-variant-numeric: tabular-nums; color: var(--muted); }
+.dock-row { max-width: 640px; margin: 0 auto; padding: 0 20px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+.dock-left { justify-self: start; display: flex; flex-direction: column; gap: 4px; }
+#timer { font-size: 17px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--muted); }
 #timer.on { color: var(--rec); }
-#meter { flex: 1; min-width: 0; height: 26px; display: block; }
-.dock-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
-.side-btn {
-  justify-self: center; display: flex; flex-direction: column; align-items: center; gap: 5px;
-  border: none; background: transparent; padding: 4px 8px;
-  font-size: 0.75rem; font-weight: 600; color: var(--muted);
-}
-.side-icon {
-  position: relative; width: 48px; height: 48px; border-radius: 50%;
-  display: grid; place-items: center; background: var(--soft); color: var(--ink);
-}
-.side-icon svg { width: 21px; height: 21px; }
-.side-btn.join:not(:disabled) .side-icon { background: var(--accent); color: var(--on-accent); }
-.side-btn.join:not(:disabled) { color: var(--ink); }
-.side-btn:disabled { opacity: 0.45; }
-#badge {
-  position: absolute; top: -3px; right: -5px;
-  min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
-  background: var(--rec); color: #fff; font: 700 0.6875rem/20px var(--ui); text-align: center;
-  box-shadow: 0 0 0 2px var(--surface);
-}
-#badge[hidden] { display: none; }
+#meter { width: 88px; height: 18px; display: block; }
 .rec {
   width: 74px; height: 74px; border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.85); background: transparent;
+  border: 4px solid #fff; background: transparent;
   display: grid; place-items: center; padding: 0;
 }
-.rec span { width: 56px; height: 56px; border-radius: 50%; background: var(--rec); transition: all 0.2s ease; }
-.rec.on { border-color: var(--rec); animation: halo 1.6s ease-out infinite; }
-.rec.on span { width: 26px; height: 26px; border-radius: 7px; }
-.rec.busy, .rec:disabled { opacity: 0.45; }
-@keyframes halo { 0% { box-shadow: 0 0 0 0 rgba(255, 111, 102, 0.4); } 100% { box-shadow: 0 0 0 18px transparent; } }
+.rec:active:not(:disabled) { opacity: 1; }
+.rec span { width: 60px; height: 60px; border-radius: 50%; background: var(--rec); transition: all 0.25s cubic-bezier(0.3, 0.7, 0.4, 1); }
+.rec:active span { transform: scale(0.92); }
+.rec.on span { width: 28px; height: 28px; border-radius: 6px; }
+.rec.busy, .rec:disabled { opacity: 0.4; }
+.join-btn {
+  justify-self: end; position: relative;
+  display: flex; align-items: center; gap: 6px;
+  border: none; border-radius: 22px; padding: 11px 16px 11px 14px;
+  background: var(--accent); color: #fff; font-size: 17px; font-weight: 600;
+}
+.join-btn svg { width: 19px; height: 19px; }
+.join-btn:disabled { background: var(--fill); color: var(--faint); }
+#badge {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--rec); color: #fff; font-size: 12px; font-weight: 600; line-height: 20px; text-align: center;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+#badge[hidden] { display: none; }
 
-/* Toast */
+/* Undo toast (iOS HUD) */
 #toast {
-  position: fixed; left: 16px; right: 16px; bottom: calc(var(--dock-h) + 12px);
-  margin: 0 auto; max-width: 380px;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  background: var(--ink); color: var(--bg);
-  border-radius: 16px; padding: 8px 8px 8px 16px; font-size: 0.9375rem; box-shadow: var(--shadow);
+  position: fixed; z-index: 5; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--dock-h) + 10px);
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 10px 10px 18px; border-radius: 22px;
+  background: var(--glass); color: #fff;
+  backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  font-size: 15px; white-space: nowrap;
 }
 #toast[hidden] { display: none; }
-#undo { flex: none; border: none; border-radius: 10px; padding: 8px 14px; font-weight: 700; background: var(--bg); color: var(--ink); }
+#undo { border: none; background: none; color: var(--accent); font-weight: 600; font-size: 15px; padding: 4px 8px; }
 
-/* Sheets (new session, joining) */
+/* Modal backdrop */
 .backdrop {
   position: fixed; inset: 0; z-index: 10;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.45);
   display: flex; align-items: flex-end; justify-content: center;
+  animation: fade 0.2s ease-out;
 }
 .backdrop[hidden] { display: none; }
-.sheet {
-  width: 100%; max-width: 520px; background: var(--surface);
-  border-radius: 28px 28px 0 0;
-  padding: 10px 22px calc(22px + env(safe-area-inset-bottom, 0px));
-  box-shadow: var(--shadow); animation: rise 0.25s ease-out;
-}
-@keyframes rise { from { transform: translateY(30px); opacity: 0; } to { transform: none; opacity: 1; } }
-.grabber { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 16px; }
-.sheet h2 { margin: 0 0 6px; font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
-.sheet p { margin: 0 0 18px; color: var(--muted); font-size: 0.9375rem; }
-.sheet-actions { display: flex; flex-direction: column; gap: 10px; }
-.sheet-actions button { border: none; border-radius: 16px; padding: 14px 16px; font-weight: 600; font-size: 1rem; }
-.sheet-actions button[hidden] { display: none; }
-.btn-primary { background: var(--accent); color: var(--on-accent); }
-.btn-quiet { background: var(--soft); color: var(--ink); }
-.btn-danger { background: color-mix(in srgb, var(--rec) 16%, var(--surface)); color: var(--rec); }
-.progress { height: 8px; border-radius: 4px; background: var(--soft); overflow: hidden; margin: 0 0 18px; }
-.join-preview { display: flex; justify-content: center; margin: 0 0 14px; }
-.join-preview:empty { display: none; }
-.join-preview video { max-width: 100%; max-height: 28vh; border-radius: 14px; background: #000; }
-.progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width 0.25s linear; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 
-/* Trim editor */
+/* Action sheet (New, Gap) */
+.action-sheet {
+  width: 100%; max-width: 420px;
+  padding: 0 8px calc(8px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; gap: 8px;
+  animation: rise 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.as-group {
+  border-radius: 14px; overflow: hidden;
+  background: rgba(44, 44, 46, 0.86);
+  backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8);
+}
+.as-header { padding: 14px 16px 13px; text-align: center; border-bottom: 0.5px solid var(--separator); }
+.as-header h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+.as-header p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.as-header p:empty { display: none; }
+.as-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+  min-height: 57px; border: none; background: transparent;
+  font-size: 20px; color: var(--accent);
+}
+.as-btn + .as-btn { border-top: 0.5px solid var(--separator); }
+.as-btn.destructive { color: var(--rec); }
+.as-btn.cancel { font-weight: 600; background: var(--surface-2); }
+.as-btn .check { width: 18px; color: var(--accent); font-weight: 600; visibility: hidden; }
+.as-btn.on .check { visibility: visible; }
+.as-btn .sub { font-size: 13px; color: var(--muted); }
+.as-btn.option { justify-content: space-between; font-size: 17px; color: var(--ink); padding: 0 16px; min-height: 50px; }
+.as-btn.option .opt-text { display: flex; flex-direction: column; align-items: flex-start; text-align: left; }
+
+/* Sheets (Join, Video options) */
+.sheet {
+  width: 100%; max-width: 560px; max-height: 92vh;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-radius: 14px 14px 0 0;
+  padding: 6px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  animation: rise 0.32s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.grabber { flex: none; width: 36px; height: 5px; border-radius: 3px; background: var(--surface-3); margin: 0 auto 12px; }
+.sheet h2 { margin: 6px 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; text-align: center; }
+.sheet > p { margin: 0 0 16px; color: var(--muted); font-size: 15px; text-align: center; line-height: 1.35; }
+.sheet-actions { display: flex; flex-direction: column; gap: 10px; }
+.sheet-actions button[hidden] { display: none; }
+.btn-filled { border: none; border-radius: 14px; min-height: 50px; padding: 0 16px; background: var(--accent); color: #fff; font-size: 17px; font-weight: 600; }
+.btn-plain { border: none; border-radius: 14px; min-height: 50px; padding: 0 16px; background: var(--fill); color: var(--accent); font-size: 17px; font-weight: 600; }
+.progress { height: 4px; border-radius: 2px; background: var(--fill-2); overflow: hidden; margin: 0 0 20px; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width 0.25s linear; }
+.join-preview { display: flex; justify-content: center; margin: 0 0 16px; }
+.join-preview:empty { display: none; }
+.join-preview video { max-width: 100%; max-height: 28vh; border-radius: 12px; background: #000; }
+
+/* Page sheet with a navigation bar (Video options) */
+.sheet.page { padding: 0 0 calc(12px + env(safe-area-inset-bottom, 0px)); background: #000; }
+.sheet-nav {
+  flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  padding: 8px 8px; border-bottom: 0.5px solid var(--separator);
+  background: var(--surface);
+  border-radius: 14px 14px 0 0;
+}
+.sheet-nav h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.sheet-scroll { overflow-y: auto; padding: 4px 16px 8px; -webkit-overflow-scrolling: touch; }
+.section-header { margin: 22px 16px 7px; font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: 0; }
+.section-footer { margin: 7px 16px 0; font-size: 13px; color: var(--muted); line-height: 1.35; }
+.section-footer.top { margin: 16px 16px 0; color: var(--ink); font-size: 15px; text-align: center; }
+.group { background: var(--surface); border-radius: 10px; padding: 8px; }
+
+/* Segmented control */
+.segmented {
+  display: flex; padding: 2px; border-radius: 9px; background: var(--fill);
+}
+.seg {
+  flex: 1 1 0; min-width: 0; border: none; background: transparent; border-radius: 7px;
+  padding: 7px 4px; font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.seg.on { background: #636366; font-weight: 600; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04); }
+.seg:active:not(:disabled) { opacity: 0.7; }
+
+/* Trim editor, like trimming a video in Photos */
 .edit-back {
   position: fixed; inset: 0; z-index: 20;
-  display: grid; place-items: center;
-  padding: calc(14px + env(safe-area-inset-top, 0px)) 14px calc(14px + env(safe-area-inset-bottom, 0px));
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(16px) saturate(1.1); -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  display: flex; justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   opacity: 0; transition: opacity 0.28s ease;
 }
 .edit-back.show { opacity: 1; }
 .edit-back[hidden] { display: none; }
 .editor {
-  --h: 168;
-  width: 100%; max-width: 520px; max-height: 100%;
+  --h: 210;
+  width: 100%; max-width: 640px; height: 100%;
   display: flex; flex-direction: column;
-  background: var(--surface); border-radius: 28px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
-  overflow: hidden; transform-origin: top left;
+  background: #000;
+  padding: env(safe-area-inset-top, 0px) 0 calc(10px + env(safe-area-inset-bottom, 0px));
+  transform-origin: top left;
 }
-.editor-head { background: hsl(var(--h) var(--tile-s) var(--tile-l)); padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1 1 auto; }
-.editor-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.editor-title strong { font-size: 1.125rem; font-weight: 700; }
-#editLen { font-weight: 700; font-variant-numeric: tabular-nums; color: hsl(var(--h) 30% var(--bar-l)); }
-.edit-video-wrap { position: relative; flex: 1 1 auto; min-height: 120px; max-height: 42vh; border-radius: 16px; overflow: hidden; background: #000; }
-#editVideo { width: 100%; height: 100%; object-fit: contain; display: block; }
-.wave-wrap { position: relative; flex: none; height: 96px; border-radius: 14px; background: rgba(255, 255, 255, 0.05); touch-action: none; cursor: ew-resize; }
+.editor-nav { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 6px 8px; min-height: 48px; }
+.editor-nav .nav-btn { color: #fff; }
+.editor-nav .nav-btn.done { justify-self: end; color: var(--yellow); font-weight: 600; }
+.editor-title { display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+.editor-title strong { font-size: 17px; font-weight: 600; }
+#editLen { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.edit-video-wrap { position: relative; flex: 1 1 auto; min-height: 120px; margin: 4px 0 12px; }
+#editVideo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.editor-tools { flex: none; padding: 0 12px; display: flex; flex-direction: column; gap: 14px; }
+.trim-row { display: flex; align-items: center; gap: 8px; }
+#editPlay { flex: none; width: 44px; height: 56px; border: none; padding: 0; background: transparent; color: #fff; display: grid; place-items: center; }
+#editPlay svg { width: 26px; height: 26px; }
+.wave-wrap { position: relative; flex: 1; height: 56px; touch-action: none; cursor: ew-resize; }
 #editWave { width: 100%; height: 100%; display: block; }
-.editor-body { flex: none; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
 .edge-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
-.edge { display: flex; flex-direction: column; gap: 6px; }
+.edge { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .edge.end { align-items: flex-end; }
-.edge-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-.edge-time { font-weight: 700; font-size: 1.0625rem; font-variant-numeric: tabular-nums; }
+.edge-label { font-size: 12px; color: var(--muted); }
+.edge-time { font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .nudge { display: flex; gap: 6px; }
-.nudge button { width: 42px; height: 36px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface); font-weight: 700; font-size: 1.125rem; line-height: 1; }
-#editPlay { width: 56px; height: 56px; border-radius: 50%; border: none; padding: 0; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; }
-#editPlay svg { width: 22px; height: 22px; }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip { border: 1px solid var(--line); background: var(--soft); color: var(--ink); border-radius: 999px; padding: 8px 14px; font-weight: 600; font-size: 0.875rem; }
-.chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
-.editor-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.editor-foot button { border: none; border-radius: 16px; padding: 14px; font-weight: 600; font-size: 1rem; }
+.nudge button { width: 36px; height: 30px; border-radius: 8px; border: none; background: var(--fill); font-size: 18px; font-weight: 500; line-height: 1; }
+.trim-modes { min-width: 168px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .rec.on, .rec-badge i { animation: none; }
-  .tile.fresh, .sheet { animation: none; }
-  .edit-back { transition: none; }
+  .tile.fresh, .sheet, .action-sheet, .backdrop { animation: none; }
+  .edit-back, .rec span { transition: none; }
 }
 </style>
 </head>
 <body>
 
-<header class="top">
-  <div class="wrap">
-    <div class="brand"><span class="brand-mark"><i></i></span>VO Camera</div>
-    <div class="status">
-      <p id="status" role="status" aria-live="polite"></p>
-      <button id="statusBtn" type="button" hidden>Use the phone camera instead</button>
-    </div>
-  </div>
+<header class="navbar">
+  <button id="newBtn" class="nav-btn" type="button" aria-label="Start a new recording">New</button>
+  <h1 class="nav-title">VO Camera</h1>
+  <button id="optBtn" class="nav-btn icon right" type="button" aria-label="Video options">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>
+  </button>
 </header>
+<div class="status">
+  <p id="status" role="status" aria-live="polite"></p>
+  <button id="statusBtn" type="button" hidden>Use the phone camera instead</button>
+</div>
 
 <section class="stage" aria-label="Camera">
-  <div class="wrap">
-    <div class="viewfinder">
-      <video id="live" playsinline muted autoplay></video>
-      <div class="cam-off" id="camOff">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
-        <span>The camera is off.</span>
-        <button id="startCam" type="button">Turn on camera</button>
-      </div>
-      <div class="rec-badge" id="recBadge" hidden><i></i><span id="badgeTime">0:00</span></div>
-      <span class="vf-info" id="vfInfo"></span>
-      <button class="vf-btn" id="lensBtn" type="button" aria-label="Switch lens" hidden>1×</button>
-      <button class="vf-btn" id="flipBtn" type="button" aria-label="Switch between front and back camera" hidden>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></svg>
-      </button>
+  <div class="viewfinder">
+    <video id="live" playsinline muted autoplay></video>
+    <div class="cam-off" id="camOff">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+      <span>The camera is off</span>
+      <button id="startCam" type="button">Turn On Camera</button>
     </div>
+    <div class="rec-badge" id="recBadge" hidden><span id="badgeTime">0:00</span></div>
+    <span class="vf-info" id="vfInfo"></span>
+    <button class="vf-btn" id="lensBtn" type="button" aria-label="Switch lens" hidden>1×</button>
+    <button class="vf-btn" id="flipBtn" type="button" aria-label="Switch between front and back camera" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 9.5A7.5 7.5 0 0 0 6 7.2L4.5 8.7"/><path d="M4.5 4.5v4.2h4.2"/><path d="M4.5 14.5A7.5 7.5 0 0 0 18 16.8l1.5-1.5"/><path d="M19.5 19.5v-4.2h-4.2"/></svg>
+    </button>
   </div>
 </section>
 
 <section class="strip" aria-label="Recorded takes">
-  <div class="wrap">
-    <div class="strip-head">
-      <span class="label">Takes</span>
-      <div class="strip-meta">
-        <span id="total"></span>
-        <button id="gapBtn" class="gap-btn" type="button">Gap 0.5 s</button>
-      </div>
-    </div>
+  <div class="strip-head">
+    <div class="strip-title"><span class="strip-label">Takes</span><span id="total"></span></div>
+    <button id="gapBtn" class="gap-btn" type="button">Gap 0.5 s</button>
   </div>
-  <div class="strip-scroll"><ol id="clips"></ol></div>
+  <ol id="clips"></ol>
 </section>
 
 <footer class="dock" id="dock">
-  <div class="wrap">
-    <div class="dock-top">
+  <div class="dock-row">
+    <div class="dock-left">
       <output id="timer" aria-label="Recording time">00:00.0</output>
       <canvas id="meter" aria-hidden="true"></canvas>
     </div>
-    <div class="dock-row">
-      <button id="newBtn" class="side-btn" type="button" aria-label="Start a new recording">
-        <span class="side-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4.5h4.5"/></svg></span>
-        New
-      </button>
-      <button id="rec" class="rec" type="button" aria-label="Start recording"><span></span></button>
-      <button id="join" class="side-btn join" type="button" disabled>
-        <span class="side-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg><span id="badge" hidden>0</span></span>
-        Join all
-      </button>
-    </div>
+    <button id="rec" class="rec" type="button" aria-label="Start recording"><span></span></button>
+    <button id="join" class="join-btn" type="button" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="7" height="12" rx="2"/><rect x="14" y="6" width="7" height="12" rx="2"/></svg>
+      Join<span id="badge" hidden>0</span>
+    </button>
   </div>
 </footer>
 
 <div id="toast" hidden><span id="toastText"></span><button id="undo" type="button">Undo</button></div>
 
 <div class="backdrop" id="sheetBack" hidden>
-  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" aria-describedby="sheetText">
-    <div class="grabber" aria-hidden="true"></div>
-    <h2 id="sheetTitle">Start a new recording?</h2>
-    <p id="sheetText"></p>
-    <div class="sheet-actions">
-      <button id="clearBtn" class="btn-danger" type="button">Clear all takes</button>
-      <button id="cancelBtn" class="btn-quiet" type="button">Cancel</button>
+  <div class="action-sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" aria-describedby="sheetText">
+    <div class="as-group">
+      <div class="as-header"><h2 id="sheetTitle">Start a New Recording?</h2><p id="sheetText"></p></div>
+      <button id="clearBtn" class="as-btn destructive" type="button">Clear All Takes</button>
     </div>
+    <div class="as-group"><button id="cancelBtn" class="as-btn cancel" type="button">Cancel</button></div>
+  </div>
+</div>
+
+<div class="backdrop" id="gapBack" hidden>
+  <div class="action-sheet" role="dialog" aria-modal="true" aria-labelledby="gapTitle">
+    <div class="as-group">
+      <div class="as-header"><h2 id="gapTitle">Gap Between Takes</h2><p>Used when the takes are joined.</p></div>
+      <div id="gapList"></div>
+    </div>
+    <div class="as-group"><button id="gapCancel" class="as-btn cancel" type="button">Cancel</button></div>
   </div>
 </div>
 
 <div class="backdrop" id="joinBack" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="joinTitle" aria-describedby="joinText">
     <div class="grabber" aria-hidden="true"></div>
-    <h2 id="joinTitle">Joining your takes</h2>
-    <p id="joinText">The takes play through once to make one video. Keep this screen open.</p>
+    <h2 id="joinTitle">Joining Your Takes</h2>
+    <p id="joinText">Keep this screen open.</p>
     <div class="join-preview" id="joinPreview"></div>
     <div class="progress"><i id="joinBar"></i></div>
     <div class="sheet-actions">
-      <button id="joinTap" class="btn-primary" type="button" hidden>Tap to continue joining</button>
-      <button id="joinSave" class="btn-primary" type="button" hidden>Save video</button>
-      <button id="joinClose" class="btn-quiet" type="button">Cancel</button>
+      <button id="joinTap" class="btn-filled" type="button" hidden>Tap to Continue Joining</button>
+      <button id="joinSave" class="btn-filled" type="button" hidden>Save Video</button>
+      <button id="joinClose" class="btn-plain" type="button">Cancel</button>
     </div>
   </div>
 </div>
 
 <div class="backdrop" id="optBack" hidden>
-  <div class="sheet opt-sheet" role="dialog" aria-modal="true" aria-labelledby="optTitle" aria-describedby="optNow">
-    <div class="grabber" aria-hidden="true"></div>
-    <h2 id="optTitle">Video options</h2>
-    <p id="optNow"></p>
-    <div class="opt-group"><span class="label">Camera</span><div class="chips" id="optCam"></div></div>
-    <div class="opt-group">
-      <span class="label">Resolution</span><div class="chips" id="optRes"></div>
-      <p class="opt-hint">Every size shows the camera's full view. A lower size only uses fewer pixels, and is quicker to join. Max is the biggest size the iPhone can still play back and edit (about 8 MP).</p>
+  <div class="sheet page" role="dialog" aria-modal="true" aria-labelledby="optTitle" aria-describedby="optNow">
+    <div class="sheet-nav">
+      <span></span>
+      <h2 id="optTitle">Video Options</h2>
+      <button id="optDone" class="nav-btn bold right" type="button">Done</button>
     </div>
-    <div class="opt-group">
-      <span class="label">Frame rate</span><div class="chips" id="optFps"></div>
-      <p class="opt-hint">Lights in India run at 50 Hz. If you see flicker or bands under tube lights or LEDs, use 25 or 50 fps.</p>
+    <div class="sheet-scroll">
+      <p id="optNow" class="section-footer top"></p>
+      <div class="section-header">Camera</div>
+      <div class="group"><div class="segmented" id="optCam"></div></div>
+      <div class="section-header">Resolution</div>
+      <div class="group"><div class="segmented" id="optRes"></div></div>
+      <p class="section-footer">Every size shows the camera's full view; a lower size only uses fewer pixels and joins faster. Max is the biggest size the iPhone can still play back and edit (about 8 MP).</p>
+      <div class="section-header">Frame Rate</div>
+      <div class="group"><div class="segmented" id="optFps"></div></div>
+      <p class="section-footer">Lights in India run at 50 Hz. If you see flicker or bands under tube lights or LEDs, use 25 or 50 fps.</p>
+      <div class="section-header">Bitrate (Mbps)</div>
+      <div class="group"><div class="segmented" id="optBit"></div></div>
+      <p class="section-footer">Higher keeps more detail but makes bigger files.</p>
     </div>
-    <div class="opt-group">
-      <span class="label">Bitrate</span><div class="chips" id="optBit"></div>
-      <p class="opt-hint">Higher keeps more detail but makes bigger files.</p>
-    </div>
-    <div class="sheet-actions"><button id="optDone" class="btn-primary" type="button">Done</button></div>
   </div>
 </div>
 
 <div class="edit-back" id="editBack" hidden>
   <div class="editor" id="editor" role="dialog" aria-modal="true" aria-labelledby="editTitle">
-    <div class="editor-head">
+    <div class="editor-nav">
+      <button class="nav-btn" id="editCancel" type="button">Cancel</button>
       <div class="editor-title"><strong id="editTitle">Take 01</strong><span id="editLen">0.00 s</span></div>
-      <div class="edit-video-wrap"><video id="editVideo" playsinline preload="auto"></video></div>
-      <div class="wave-wrap" id="waveWrap"><canvas id="editWave" role="img" aria-label="Sound of this take. Drag the handles to trim the start and end."></canvas></div>
+      <button class="nav-btn done" id="editSave" type="button">Done</button>
     </div>
-    <div class="editor-body">
+    <div class="edit-video-wrap"><video id="editVideo" playsinline preload="auto"></video></div>
+    <div class="editor-tools">
+      <div class="trim-row">
+        <button id="editPlay" type="button" aria-label="Play the trimmed take"></button>
+        <div class="wave-wrap" id="waveWrap"><canvas id="editWave" role="img" aria-label="Trim bar. Drag the yellow handles to trim the start and end."></canvas></div>
+      </div>
       <div class="edge-row">
         <div class="edge">
           <span class="edge-label">Start</span>
           <span class="edge-time" id="editStart">0:00.00</span>
           <div class="nudge"><button type="button" data-nudge="s-" aria-label="Start a little earlier">−</button><button type="button" data-nudge="s+" aria-label="Start a little later">+</button></div>
         </div>
-        <button id="editPlay" type="button" aria-label="Play the trimmed take"></button>
+        <div class="segmented trim-modes">
+          <button class="seg" id="chipAuto" type="button">Auto Trim</button>
+          <button class="seg" id="chipFull" type="button">Full Take</button>
+        </div>
         <div class="edge end">
           <span class="edge-label">End</span>
           <span class="edge-time" id="editEnd">0:00.00</span>
           <div class="nudge"><button type="button" data-nudge="e-" aria-label="End a little earlier">−</button><button type="button" data-nudge="e+" aria-label="End a little later">+</button></div>
         </div>
-      </div>
-      <div class="chips">
-        <button class="chip" id="chipAuto" type="button">Auto trim</button>
-        <button class="chip" id="chipFull" type="button">Full take</button>
-      </div>
-      <div class="editor-foot">
-        <button class="btn-quiet" id="editCancel" type="button">Cancel</button>
-        <button class="btn-primary" id="editSave" type="button">Save trim</button>
       </div>
     </div>
   </div>
@@ -463,6 +528,7 @@ svg { display: block; }
   const $ = (id) => document.getElementById(id);
   const el = {
     live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'), viewfinder: document.querySelector('.viewfinder'),
+    optBtn: $('optBtn'), gapBack: $('gapBack'), gapList: $('gapList'), gapCancel: $('gapCancel'),
     optBack: $('optBack'), optNow: $('optNow'), optCam: $('optCam'), optRes: $('optRes'), optFps: $('optFps'), optBit: $('optBit'), optDone: $('optDone'),
     recBadge: $('recBadge'), badgeTime: $('badgeTime'),
     meter: $('meter'), timer: $('timer'), rec: $('rec'),
@@ -483,7 +549,8 @@ svg { display: block; }
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const HEAD_PAD = 0.08;               // seconds kept before the voice starts
   const TAIL_PAD = 0.2;                // seconds kept after it stops
-  const GAPS = ['natural', 0.25, 0.5, 0.75, 1, 1.5];
+  const GAPS = ['natural', 0, 0.25, 0.5, 0.75, 1, 1.5];
+  const TIGHT_HEAD = 0.03, TIGHT_TAIL = 0.06;   // 'No gap': keep only a breath of silence around the voice
   const NUDGE = 0.05;
   const MIN_LEN = 0.3;
   const REDUCE_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -519,9 +586,15 @@ svg { display: block; }
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // Messages float over the picture for a few seconds, like iOS banners; ones that need action stay
+  let statusTimer = 0;
   function setStatus(text, offerPhone) {
+    clearTimeout(statusTimer);
     el.status.textContent = text || '';
     el.statusBtn.hidden = !offerPhone;
+    if (text && !offerPhone && !/…$/.test(text)) {
+      statusTimer = setTimeout(() => { el.status.textContent = ''; }, Math.min(9000, 2500 + text.length * 45));
+    }
   }
 
   function audioCtx() {
@@ -909,19 +982,19 @@ svg { display: block; }
 
   /* ---------- video options ---------- */
   const chipsHtml = (items, key, cur) => items.map((it) =>
-    '<button type="button" class="chip' + (String(it.v) === String(cur) ? ' on' : '') + '" data-k="' + key + '" data-v="' + it.v + '">' + it.t + '</button>').join('');
+    '<button type="button" class="seg' + (String(it.v) === String(cur) ? ' on' : '') + '" data-k="' + key + '" data-v="' + it.v + '">' + it.t + '</button>').join('');
 
   function renderOptions() {
     const cams = [{ v: 'front', t: 'Front' }].concat(lenses.length
-      ? lenses.map((l, i) => ({ v: 'back' + i, t: 'Back ' + l.name }))
+      ? lenses.map((l, i) => ({ v: 'back' + i, t: lenses.length > 1 ? 'Back ' + l.name : 'Back' }))
       : [{ v: 'back0', t: 'Back' }]);
     el.optCam.innerHTML = chipsHtml(cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
     el.optRes.innerHTML = chipsHtml(RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
-    el.optFps.innerHTML = chipsHtml(FPS.map((f) => ({ v: f, t: f + ' fps' })), 'fps', settings.fps);
-    el.optBit.innerHTML = chipsHtml(BITS.map((b) => ({ v: b.id, t: b.label })), 'bits', settings.bits);
+    el.optFps.innerHTML = chipsHtml(FPS.map((f) => ({ v: f, t: String(f) })), 'fps', settings.fps);
+    el.optBit.innerHTML = chipsHtml(BITS.map((b) => ({ v: b.id, t: String(Math.round(b.bps / 1e6)) })), 'bits', settings.bits);
     const now = el.vfInfo.textContent.replace(/^\S+ /, '');
-    el.optNow.textContent = !stream ? 'Turn on the camera to see what it gives.'
-      : 'The camera is giving ' + now + '.' + (activeRes !== settings.res ? ' It could not do ' + resById(settings.res).label + ' here.' : '');
+    el.optNow.textContent = !stream ? 'Turn on the camera to see what it records.'
+      : 'Recording at ' + now + (activeRes !== settings.res ? ' (the camera could not do ' + resById(settings.res).label + ')' : '');
   }
 
   function openOptions() {
@@ -937,6 +1010,7 @@ svg { display: block; }
     openOptions();
   });
   el.optDone.addEventListener('click', closeOptions);
+  el.optBtn.addEventListener('click', openOptions);
   el.optBack.addEventListener('click', async (e) => {
     if (e.target === el.optBack) { closeOptions(); return; }
     const b = e.target.closest('[data-k]');
@@ -1065,7 +1139,17 @@ svg { display: block; }
   }
 
   /* ---------- takes ---------- */
-  const rangeOf = (c) => c.manual || (isNatural() ? [0, c.len] : [c.autoS, c.autoE]);
+  const rangeOf = (c) => {
+    if (c.manual) return c.manual;
+    if (isNatural()) return [0, c.len];
+    if (gapSeconds === 0 && c.pcm) {
+      // No gap: cut closer to the voice than the usual auto trim
+      const s = c.autoS > 0 ? c.autoS + Math.round((HEAD_PAD - TIGHT_HEAD) * c.rate) : 0;
+      const e = c.autoE < c.len ? c.autoE - Math.round((TAIL_PAD - TIGHT_TAIL) * c.rate) : c.len;
+      if (e - s > MIN_LEN * c.rate) return [s, e];
+    }
+    return [c.autoS, c.autoE];
+  };
   const rangeSec = (c) => { const r = rangeOf(c); return [r[0] / c.rate, Math.min(c.dur, r[1] / c.rate)]; };
   const usedSeconds = (c) => { const r = rangeSec(c); return Math.max(0, r[1] - r[0]); };
 
@@ -1162,21 +1246,44 @@ svg { display: block; }
   }
 
   /* ---------- gap ---------- */
+  const gapName = (g) => (g === 'natural' ? 'Natural' : g === 0 ? 'No gap' : g + ' s');
   function showGap() {
-    el.gapBtn.textContent = isNatural() ? 'Natural gap' : 'Gap ' + gapSeconds + ' s';
+    el.gapBtn.textContent = isNatural() ? 'Natural gap' : gapSeconds === 0 ? 'No gap' : 'Gap ' + gapSeconds + ' s';
     el.gapBtn.setAttribute('aria-label', isNatural()
       ? 'Gap between takes: natural, kept as recorded. Tap to change.'
       : 'Pause between takes when joined: ' + gapSeconds + ' seconds. Tap to change.');
   }
-  el.gapBtn.addEventListener('click', () => {
-    gapSeconds = GAPS[(GAPS.indexOf(gapSeconds) + 1) % GAPS.length];
+  const GAP_SUB = {
+    natural: 'Keep the silence as recorded',
+    0: 'Takes back to back, silence trimmed',
+  };
+  function openGapSheet() {
+    if (recording || busy || joining || edit) return;
+    el.gapList.innerHTML = GAPS.map((g) =>
+      '<button type="button" class="as-btn option' + (g === gapSeconds ? ' on' : '') + '" data-gap="' + g + '">' +
+        '<span class="opt-text"><span>' + gapName(g) + '</span>' + (GAP_SUB[g] ? '<span class="sub">' + GAP_SUB[g] + '</span>' : '') + '</span>' +
+        '<span class="check" aria-hidden="true">✓</span></button>').join('');
+    el.gapBack.hidden = false;
+  }
+  const closeGapSheet = () => { el.gapBack.hidden = true; };
+  el.gapBtn.addEventListener('click', openGapSheet);
+  el.gapCancel.addEventListener('click', closeGapSheet);
+  el.gapBack.addEventListener('click', (e) => {
+    if (e.target === el.gapBack) { closeGapSheet(); return; }
+    const b = e.target.closest('[data-gap]');
+    if (!b) return;
+    const v = b.dataset.gap;
+    gapSeconds = v === 'natural' ? 'natural' : parseFloat(v);
     try { localStorage.setItem('vc-gap', String(gapSeconds)); } catch (err) {}
+    closeGapSheet();
     showGap();
     render();
     clips.forEach(makeThumb);
     setStatus(isNatural()
-      ? 'Natural gap: takes keep the silence you recorded. Only your own trims are applied.'
-      : 'Join all will leave ' + gapSeconds + ' s between takes, holding the last frame.');
+      ? 'Natural: takes keep the silence you recorded. Only your own trims are applied.'
+      : gapSeconds === 0
+        ? 'No gap: takes are joined back to back, with the silence trimmed away.'
+        : 'Join will leave ' + gapSeconds + ' s between takes, holding the last frame.');
   });
   showGap();
 
@@ -1213,6 +1320,7 @@ svg { display: block; }
     const s = getComputedStyle(el.editor);
     edit.colors = {
       accent: s.getPropertyValue('--accent').trim(), rec: s.getPropertyValue('--rec').trim(), ink: s.getPropertyValue('--ink').trim(),
+      yellow: s.getPropertyValue('--yellow').trim(),
       bar: 'hsl(' + clip.hue + ', 30%, ' + s.getPropertyValue('--bar-l').trim() + ')',
     };
     sizeWave();
@@ -1279,29 +1387,38 @@ svg { display: block; }
   const xOf = (smp) => EDGE + (smp / edit.clip.len) * (edit.w - 2 * EDGE);
   const sampleOf = (x) => clamp((x - EDGE) / (edit.w - 2 * EDGE), 0, 1) * edit.clip.len;
 
+  // Trim bar like the Photos app: the kept part sits inside a yellow frame with grab handles
   function drawEdit(playSample) {
     if (!edit) return;
     const g = el.editWave.getContext('2d'), { w, h, dpr, peaks, colors, s, e } = edit, len = edit.clip.len;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
-    const waveH = h - 30, mid = 6 + waveH / 2;
+    const top = 2, bh = h - 4, mid = top + bh / 2, x0 = EDGE, x1 = w - EDGE;
+    const rr = (x, y, ww, hh, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + ww, y, x + ww, y + hh, r); g.arcTo(x + ww, y + hh, x, y + hh, r); g.arcTo(x, y + hh, x, y, r); g.arcTo(x, y, x + ww, y, r); g.closePath(); };
+    g.fillStyle = 'rgba(118,118,128,0.24)';
+    rr(x0, top, x1 - x0, bh, 6); g.fill();
     for (let b = 0; b < peaks.length; b++) {
       const smp = ((b + 0.5) / peaks.length) * len, inside = smp >= s && smp <= e;
-      const bh = Math.max(2, peaks[b] * (waveH - 4));
-      g.globalAlpha = inside ? 1 : 0.28;
-      g.fillStyle = inside ? colors.bar : colors.ink;
-      g.fillRect(EDGE + b * 3, mid - bh / 2, 2, bh);
+      const ph = Math.max(2, peaks[b] * (bh - 14));
+      g.globalAlpha = inside ? 0.95 : 0.3;
+      g.fillStyle = colors.ink;
+      g.fillRect(x0 + b * 3, mid - ph / 2, 2, ph);
     }
     g.globalAlpha = 1;
-    [s, e].forEach((smp) => {
-      const x = xOf(smp);
-      g.fillStyle = colors.accent;
-      g.fillRect(x - 1.5, 4, 3, h - 26);
-      g.beginPath(); g.arc(x, h - 12, 10, 0, Math.PI * 2); g.fill();
-      g.fillStyle = '#0b2622';
-      g.fillRect(x - 1, h - 17, 2, 10);
-    });
-    if (playSample != null) { g.fillStyle = colors.rec; g.fillRect(xOf(playSample) - 1, 2, 2, h - 22); }
+    const xs = xOf(s), xe = xOf(e), hw = 14;
+    g.fillStyle = colors.yellow;
+    g.fillRect(xs, top, xe - xs, 3);
+    g.fillRect(xs, top + bh - 3, xe - xs, 3);
+    rr(xs - hw, top, hw + 1, bh, 6); g.fill();
+    rr(xe - 1, top, hw + 1, bh, 6); g.fill();
+    g.strokeStyle = '#000'; g.lineWidth = 2.2; g.lineCap = 'round'; g.lineJoin = 'round';
+    g.beginPath(); g.moveTo(xs - hw / 2 + 2, mid - 6); g.lineTo(xs - hw / 2 - 2, mid); g.lineTo(xs - hw / 2 + 2, mid + 6); g.stroke();
+    g.beginPath(); g.moveTo(xe + hw / 2 - 2, mid - 6); g.lineTo(xe + hw / 2 + 2, mid); g.lineTo(xe + hw / 2 - 2, mid + 6); g.stroke();
+    if (playSample != null) {
+      const xp = xOf(playSample);
+      g.fillStyle = '#fff';
+      rr(xp - 2, top - 1, 4, bh + 2, 2); g.fill();
+    }
   }
 
   function refreshEdit(playSample) {
@@ -1991,7 +2108,7 @@ svg { display: block; }
     if (stream) { stopCamera(); el.camOff.hidden = false; el.flipBtn.hidden = true; }
     let blob = null, why = '';
     joinLog = [];
-    el.joinSave.textContent = 'Save video';
+    el.joinSave.textContent = 'Save Video';
     el.joinSave.dataset.mode = 'save';
     jlog('browser: ' + navigator.userAgent);
     jlog('tools: VideoEncoder ' + !!window.VideoEncoder + ', VideoDecoder ' + !!window.VideoDecoder + ', AudioEncoder ' + !!window.AudioEncoder +
@@ -2127,7 +2244,7 @@ svg { display: block; }
     el.joinBar.style.width = '100%';
     el.joinTitle.textContent = 'Your video is ready';
     el.joinText.textContent = clock(joinedSeconds()) + ' long, ' + (blob.size / 1048576).toFixed(1) + ' MB. ' +
-      (IS_IOS ? 'Tap Save video, then choose Save Video or send it to your editing app.' : 'Tap Save video to download it.');
+      (IS_IOS ? 'Tap Save Video, then choose Save Video or send it to your editing app.' : 'Tap Save Video to download it.');
     el.joinSave.hidden = false;
     el.joinClose.textContent = 'Close';
     el.joinSave.focus();
@@ -2159,7 +2276,7 @@ svg { display: block; }
     if (recording || busy || joining) return;
     if (!clips.length) { setStatus('Already a fresh start. Tap record when you are ready.'); return; }
     el.sheetText.textContent = (clips.length === 1 ? 'Your 1 take' : 'All ' + clips.length + ' takes') + ' will be removed.' +
-      (unsaved ? " You haven't saved them with Join all yet." : '');
+      (unsaved ? " You haven't joined and saved them yet." : '');
     el.sheetBack.hidden = false;
     el.clearBtn.focus();
   }
@@ -2224,10 +2341,11 @@ svg { display: block; }
     if (e.key === 'Escape') {
       if (edit) closeEditor(false);
       else if (!el.optBack.hidden) closeOptions();
+      else if (!el.gapBack.hidden) closeGapSheet();
       else if (!el.sheetBack.hidden) el.sheetBack.hidden = true;
       return;
     }
-    if (e.code !== 'Space' || edit || joining || !el.sheetBack.hidden || !el.optBack.hidden) return;
+    if (e.code !== 'Space' || edit || joining || !el.sheetBack.hidden || !el.optBack.hidden || !el.gapBack.hidden) return;
     const tag = e.target && e.target.tagName;
     if (tag === 'BUTTON' || tag === 'INPUT') return;
     e.preventDefault();
