@@ -408,7 +408,7 @@ svg { display: block; }
     <div class="opt-group"><span class="label">Camera</span><div class="chips" id="optCam"></div></div>
     <div class="opt-group">
       <span class="label">Resolution</span><div class="chips" id="optRes"></div>
-      <p class="opt-hint">Every size shows the camera's full view. A lower size only uses fewer pixels, and is quicker to join.</p>
+      <p class="opt-hint">Every size shows the camera's full view. A lower size only uses fewer pixels, and is quicker to join. Max is the biggest size the iPhone can still play back and edit (about 8 MP).</p>
     </div>
     <div class="opt-group">
       <span class="label">Frame rate</span><div class="chips" id="optFps"></div>
@@ -684,6 +684,7 @@ svg { display: block; }
     { id: 'max', label: 'Max', short: 0 },
   ];
   const resSize = (r) => r.short || 1e9;
+  const MAX_PIXELS = 8847360;
   const FPS = [24, 25, 30, 50, 60];
   const BITS = [
     { id: 'std', label: '6 Mbps', bps: 6000000 },
@@ -753,7 +754,9 @@ svg { display: block; }
       const nat = nativeShape[camKey()] || { long: 4032, short: 3024, matchesScreen: true };
       // ask the same way round the camera delivers, so it never has to crop to turn the picture
       const portrait = nat.matchesScreen ? screenPortrait : !screenPortrait;
-      const k = res.short ? Math.min(1, res.short / nat.short) : 1;
+      // Max is capped at ~8.8 MP: larger iPhone video (H.264 level 6) cannot be played back or edited on the phone itself
+      const capK = Math.min(1, Math.sqrt(MAX_PIXELS / (nat.short * nat.long)));
+      const k = Math.min(capK, res.short ? res.short / nat.short : 1);
       const s = Math.round(nat.short * k / 2) * 2, l = Math.round(nat.long * k / 2) * 2;
       v.width = { ideal: portrait ? s : l };
       v.height = { ideal: portrait ? l : s };
@@ -1755,6 +1758,18 @@ svg { display: block; }
     };
     await sleep(250);   // let the test encoders release the phone's video hardware
     makeEncoder();
+    // In batch mode the decoder and encoder are never open together (big frames exhaust the phone's video hardware)
+    const suspendEncoder = async () => {
+      if (!venc || venc.state === 'closed') return;
+      try { await venc.flush(); } catch (err) { failure = failure || err; }
+      try { venc.close(); } catch (err) {}
+    };
+    const resumeEncoder = async () => {
+      if (venc && venc.state === 'configured' && !failure) return;
+      failure = null;
+      await sleep(60);
+      makeEncoder();
+    };
 
     const canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
@@ -1765,6 +1780,7 @@ svg { display: block; }
     jlog('joining at ' + W + 'x' + H + ' ' + vcfg.codec + ' ' + Math.round(vcfg.bitrate / 1e6) + 'M, ' + fps + ' fps, sound ' + (copySound ? 'copied' : acfg.codec));
     const tickTime = () => tick / fps;
     const emit = async () => {
+      if (venc.state === 'closed' && !failure && opts.batch) await resumeEncoder();
       if (failure || venc.state !== 'configured') await recover();
       const t = tickTime();
       const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(1e6 / fps) });
@@ -1792,7 +1808,7 @@ svg { display: block; }
         off = gapEnd;
       }
       el.joinText.textContent = 'Joining take ' + (i + 1) + ' of ' + clips.length + '…';
-      st.stage = 'joining take ' + (i + 1) + (p.useDecoder ? '' : ' through the player');
+      st.stage = 'joining take ' + (i + 1) + (p.useDecoder ? (opts.batch ? ' in batches' : '') : ' through the player');
       const end = off + len;
       const shift = p.vEdit + p.audioStart;   // take time 0 is where its sound starts
       // put a frame (at take time t) on the timeline: hold the previous picture until its moment, then draw it
@@ -1804,7 +1820,59 @@ svg { display: block; }
         }
       };
       const handle = async (f, rot) => { await place(f.timestamp / 1e6 - shift, () => drawFrame(g, f, rot, W, H)); f.close(); };
-      if (p.useDecoder) {
+      if (p.useDecoder && opts.batch) {
+        // Batches of one keyframe group: decode them to still pictures with the encoder closed,
+        // then close the decoder and encode the pictures. Slower, but the two never compete.
+        const S = p.samples;
+        const tOf = (s) => s.cts / s.timescale - shift;
+        let start = 0;
+        for (let k = 0; k < S.length; k++) if (S[k].is_sync && tOf(S[k]) <= r[0] + 1e-3) start = k;
+        const scratch = document.createElement('canvas');
+        scratch.width = W; scratch.height = H;
+        const sg = scratch.getContext('2d');
+        let idx = start;
+        while (idx < S.length && tOf(S[idx]) <= r[1] + 0.2) {
+          let j = idx + 1;
+          while (j < S.length && !S[j].is_sync) j++;
+          await suspendEncoder();
+          const shots = [];
+          let decFail = null;
+          const pending = [];
+          const dec = new VideoDecoder({ output: (f) => pending.push(f), error: (e) => { decFail = e; } });
+          dec.configure(decoderConfig(p));
+          const takeShots = async () => {
+            while (pending.length) {
+              const f = pending.shift();
+              const t = f.timestamp / 1e6 - shift;
+              if (t <= r[1] + 0.05) {
+                drawFrame(sg, f, p.rot, W, H);
+                f.close();
+                const blob = await new Promise((res) => scratch.toBlob(res, 'image/jpeg', 0.95));
+                if (blob) shots.push({ t, blob });
+              } else f.close();
+            }
+          };
+          for (let k = idx; k < j; k++) {
+            if (decFail) break;
+            dec.decode(toChunk(S[k]));
+            while (dec.decodeQueueSize > 3 || pending.length > 1) { await takeShots(); if (dec.decodeQueueSize > 3) await sleep(2); }
+            await takeShots();
+            if (joinCancelled) throw new Error('cancelled');
+          }
+          await dec.flush().catch(() => {});
+          await takeShots();
+          try { dec.close(); } catch (err) {}
+          if (decFail) throw new Error('decoder: ' + describe(decFail));
+          await resumeEncoder();
+          shots.sort((a, b) => a.t - b.t);
+          for (const sh of shots) {
+            const img = await createImageBitmap(sh.blob);
+            await place(sh.t, () => g.drawImage(img, 0, 0, W, H));
+            img.close();
+          }
+          idx = j;
+        }
+      } else if (p.useDecoder) {
         const queue = [];
         let decFail = null;
         const decError = () => new Error('decoder: ' + describe(decFail));
@@ -1930,7 +1998,7 @@ svg { display: block; }
       ', frame callback ' + ('requestVideoFrameCallback' in HTMLVideoElement.prototype) + '; settings ' + JSON.stringify(settings));
     if (canJoinExact()) {
       // Frame-by-frame join; if it fails, try again with safer settings before giving up on it
-      const attempts = [{}, { forcePlayer: true, maxLong: 1920, maxBits: 12000000 }, { forcePlayer: true, maxLong: 1280, maxBits: 8000000 }];
+      const attempts = [{}, { batch: true, maxLong: 1920, maxBits: 12000000 }, { forcePlayer: true, maxLong: 1920, maxBits: 12000000 }];
       const reasons = [];
       for (let a = 0; a < attempts.length && !blob && !joinCancelled; a++) {
         if (a) {
