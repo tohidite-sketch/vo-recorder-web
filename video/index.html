@@ -284,7 +284,7 @@ svg { display: block; }
 
 /* Sheets (Join, Video options) */
 .sheet {
-  width: 100%; max-width: 560px; max-height: 92vh;
+  width: 100%; max-width: 560px; max-height: min(92vh, calc(100% - env(safe-area-inset-top, 0px) - 28px));
   display: flex; flex-direction: column;
   background: var(--surface);
   border-radius: 14px 14px 0 0;
@@ -317,14 +317,14 @@ svg { display: block; }
 /* Video options slides up like an iPhone page sheet, can be dragged down to close, and slides away again */
 #optBack { animation: none; background: rgba(0, 0, 0, 0); transition: background-color 0.35s ease; }
 #optBack.show { background: rgba(0, 0, 0, 0.45); }
-#optBack .sheet { animation: none; transform: translateY(100%); transition: transform 0.45s cubic-bezier(0.32, 0.72, 0, 1); will-change: transform; touch-action: pan-y; }
+#optBack .sheet { max-height: calc(100% - env(safe-area-inset-top, 0px) - 28px); animation: none; transform: translateY(100%); transition: transform 0.45s cubic-bezier(0.32, 0.72, 0, 1); will-change: transform; touch-action: pan-y; }
 #optBack.show .sheet { transform: none; }
 #optBack .sheet.dragging { transition: none; }
 #optBack .sheet-nav { position: relative; padding-top: 14px; touch-action: none; cursor: grab; }
 #optBack .sheet-nav::before { content: ''; position: absolute; top: 5px; left: 50%; width: 36px; height: 5px; margin-left: -18px; border-radius: 3px; background: var(--surface-3); }
 #optNow { min-height: 2.7em; }
 .segmented { transition: opacity 0.2s ease; }
-.segmented.busy { opacity: 0.45; pointer-events: none; }
+.segmented.busy { opacity: 0.5; }
 .section-header { margin: 22px 16px 7px; font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: 0; }
 .section-footer { margin: 7px 16px 0; font-size: 13px; color: var(--muted); line-height: 1.35; }
 .section-footer.top { margin: 16px 16px 0; color: var(--ink); font-size: 15px; text-align: center; }
@@ -847,7 +847,7 @@ svg { display: block; }
     try {
       const v = videoConstraints(null);
       v.width = { ideal: 4096 }; v.height = { ideal: 4096 };
-      const probe = await navigator.mediaDevices.getUserMedia({ video: v });
+      const probe = await askCamera({ video: v }, 6000);
       const t = probe.getVideoTracks()[0];
       const caps = t.getCapabilities ? t.getCapabilities() : {};
       const st = t.getSettings ? t.getSettings() : {};
@@ -933,11 +933,39 @@ svg { display: block; }
     }
   }
 
+  // Ask for the camera, but never wait forever: iPhone sometimes never answers (after app switching, or
+  // while it is still letting go of the last camera). A late answer is switched off straight away.
+  function askCamera(constraints, ms) {
+    let late = false;
+    const p = navigator.mediaDevices.getUserMedia(constraints);
+    p.then((st) => { if (late) st.getTracks().forEach((t) => t.stop()); }, () => {});
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { late = true; const e = new Error('The camera did not answer'); e.name = 'TimeoutError'; reject(e); }, ms);
+      p.then((st) => { clearTimeout(timer); if (!late) resolve(st); }, (e) => { clearTimeout(timer); reject(e); });
+    });
+  }
+
+  // One camera start at a time. A request made while one is running is not lost: it runs again
+  // straight after with the newest choices, so taps in Video Options always take effect.
+  let camJob = null, camAgain = false;
+  function startCamera() {
+    if (!canRecord) { setMode('phone'); return Promise.resolve(); }
+    if (camJob) { camAgain = true; return camJob; }
+    camJob = (async () => {
+      starting = true;
+      try {
+        do { camAgain = false; await startCameraOnce(); } while (camAgain);
+      } catch (err) {
+        stopCamera();
+        el.camOff.hidden = false;
+        setStatus('The camera could not start (' + ((err && err.name) || 'error') + '). Tap Turn On Camera to try again.', true);
+      } finally { starting = false; camJob = null; }
+    })();
+    return camJob;
+  }
+
   // Start the camera at the chosen size; if the phone shows no picture at that size, step down until it does
-  async function startCamera() {
-    if (!canRecord) { setMode('phone'); return; }
-    if (starting) return;
-    starting = true;
+  async function startCameraOnce() {
     stopCamera();
     setStatus('Starting the camera…');
     await learnNative();
@@ -946,25 +974,26 @@ svg { display: block; }
     let lastErr = null, used;
     for (const res of ladder) {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(res), audio: AUDIO });
+        stream = await askCamera({ video: videoConstraints(res), audio: AUDIO }, 8000);
       } catch (err) {
         lastErr = err; stream = null;
-        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'NotFoundError')) break;
+        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'NotFoundError' || err.name === 'TimeoutError')) break;
         if (lenses.length) { lenses = []; lensIndex = 0; }
         continue;
       }
       el.live.srcObject = stream;
       el.live.classList.toggle('mirror', facing === 'user');
-      try { await el.live.play(); } catch (err) {}
+      await Promise.race([el.live.play().catch(() => {}), sleep(2500)]);
       if (await framesFlowing(3500)) { used = res; break; }
       stream.getTracks().forEach((t) => t.stop());
       stream = null;
       el.live.srcObject = null;
     }
-    starting = false;
     if (!stream) {
       el.camOff.hidden = false;
-      setStatus(lastErr && lastErr.name === 'NotFoundError'
+      setStatus(lastErr && lastErr.name === 'TimeoutError'
+        ? 'The camera did not respond. Tap Turn On Camera to try again; if it keeps happening, close the app and open it again.'
+        : lastErr && lastErr.name === 'NotFoundError'
         ? 'No camera was found on this device.'
         : lastErr && (lastErr.name === 'NotAllowedError' || lastErr.name === 'SecurityError')
           ? 'The camera or microphone is blocked. Allow both for Safari in Settings, then reload.'
@@ -975,7 +1004,7 @@ svg { display: block; }
     if (!lensesListed) {
       await listLenses();
       const cur = stream.getVideoTracks()[0].getSettings().deviceId;
-      if (facing === 'environment' && lenses.length && lenses[lensIndex].id !== cur) return startCamera();
+      if (facing === 'environment' && lenses.length && lenses[lensIndex].id !== cur) { camAgain = true; return; }
     }
     activeRes = used ? used.id : null;
     await widest(stream.getVideoTracks()[0]);
@@ -1109,7 +1138,7 @@ svg { display: block; }
   el.optBack.addEventListener('click', async (e) => {
     if (e.target === el.optBack) { closeOptions(); return; }
     const b = e.target.closest('[data-k]');
-    if (!b || starting) return;
+    if (!b) return;
     haptic();
     const k = b.dataset.k, v = b.dataset.v;
     if (k === 'res') settings.res = v;
@@ -1123,7 +1152,7 @@ svg { display: block; }
     }
     saveSettings();
     renderOptions();
-    if (k !== 'bits' && k !== 'boost' && stream) {
+    if (k !== 'bits' && k !== 'boost' && (stream || starting)) {
       // the camera restarts for these; hold the choices still until it has
       const rows = [el.optCam, el.optRes, el.optFps];
       rows.forEach((r) => r.classList.add('busy'));
