@@ -1109,6 +1109,13 @@ svg { display: block; }
         const buf = await blob.arrayBuffer();
         audio = await new Promise((res, rej) => audioCtx().decodeAudioData(buf, res, rej));
       } catch (err) { audio = null; }
+      if (!audio && window.AudioDecoder) {
+        try {
+          await loadLibs();
+          const p = await demux(await blob.arrayBuffer());
+          if (p.aac) audio = await decodeAacPackets(p.aac);
+        } catch (err) { audio = null; }
+      }
       let dur = audio ? audio.duration : 0;
       if (!dur) { const v = await loadVideo(url); dur = await realDuration(v); dropVideo(v); }
       if (dur < 0.4) { URL.revokeObjectURL(url); setStatus('That one was too short to keep.'); finishBusy(); return; }
@@ -1783,6 +1790,140 @@ svg { display: block; }
     }
   }
 
+  // Copy one AudioData into separate Float32 channels, whatever sample format the browser hands back
+  function audioPlanes(d, ch) {
+    const n = d.numberOfFrames, nc = d.numberOfChannels, out = [];
+    try {
+      for (let k = 0; k < ch; k++) { const b = new Float32Array(n); d.copyTo(b, { planeIndex: Math.min(k, nc - 1), format: 'f32-planar' }); out.push(b); }
+      return out;
+    } catch (err) { out.length = 0; }
+    const f = d.format || '';
+    const planar = f.indexOf('planar') >= 0, isF32 = f.indexOf('f32') === 0, isS16 = f.indexOf('s16') === 0, isS32 = f.indexOf('s32') === 0;
+    const Arr = isF32 ? Float32Array : isS16 ? Int16Array : isS32 ? Int32Array : Uint8Array;
+    const scale = isF32 ? 1 : isS16 ? 1 / 32768 : isS32 ? 1 / 2147483648 : 1 / 128;
+    const conv = (v) => (Arr === Uint8Array ? (v - 128) * scale : v * scale);
+    if (planar) {
+      for (let k = 0; k < ch; k++) { const b = new Arr(n); d.copyTo(b, { planeIndex: Math.min(k, nc - 1) }); const o = new Float32Array(n); for (let j = 0; j < n; j++) o[j] = conv(b[j]); out.push(o); }
+    } else {
+      const b = new Arr(n * nc); d.copyTo(b, { planeIndex: 0 });
+      for (let k = 0; k < ch; k++) { const o = new Float32Array(n), c = Math.min(k, nc - 1); for (let j = 0; j < n; j++) o[j] = conv(b[j * nc + c]); out.push(o); }
+    }
+    return out;
+  }
+
+  // A take's sound decoded from its own AAC frames, for when Safari's built-in audio decoding cannot read the video file.
+  // Time 0 is where the take's sound starts, the same timeline the picture and the trims use.
+  async function decodeAacPackets(a) {
+    if (!window.AudioDecoder || !window.EncodedAudioChunk) throw new Error('no audio decoder');
+    if (!a.samples.length) throw new Error('no sound frames');
+    const rate = a.rate, ch = Math.min(2, a.ch), pieces = [];
+    let err = null;
+    const dec = new AudioDecoder({ output: (d) => pieces.push(d), error: (e) => { err = e; } });
+    dec.configure({ codec: 'mp4a.40.2', sampleRate: rate, numberOfChannels: a.ch, description: a.asc });
+    for (const s of a.samples) {
+      if (err) break;
+      dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: Math.round(s.cts * 1e6 / s.timescale), duration: Math.round(s.duration * 1e6 / s.timescale), data: s.data }));
+      if (dec.decodeQueueSize > 50) await sleep(1);
+    }
+    try { await dec.flush(); } catch (e) { err = err || e; }
+    try { dec.close(); } catch (e) {}
+    if (err && !pieces.length) throw err;
+    const last = a.samples[a.samples.length - 1];
+    const N = Math.max(1, Math.round(((last.cts + last.duration) / last.timescale - a.edit - a.pres0) * rate));
+    const chans = [];
+    for (let k = 0; k < ch; k++) chans.push(new Float32Array(N));
+    for (const d of pieces) {
+      const start = Math.round((d.timestamp / 1e6 - a.edit - a.pres0) * rate);
+      const planes = audioPlanes(d, ch);
+      for (let k = 0; k < ch; k++) {
+        const src = planes[k], dst = chans[k];
+        for (let j = 0; j < src.length; j++) { const idx = start + j; if (idx >= 0 && idx < N) dst[idx] = src[j]; }
+      }
+      d.close();
+    }
+    return { sampleRate: rate, numberOfChannels: ch, length: N, duration: N / rate, getChannelData: (k) => chans[Math.min(k, ch - 1)] };
+  }
+
+  // AAC 'AudioSpecificConfig' (2 bytes) for AAC-LC, used when the encoder does not supply one
+  function aacConfig(rate, ch) {
+    const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    const idx = Math.max(0, rates.indexOf(rate));
+    return new Uint8Array([(2 << 3) | (idx >> 1), ((idx & 1) << 7) | (ch << 3)]);
+  }
+
+  // Encode the sound to AAC and check that it really decodes to audible sound.
+  // Handles encoders that add ADTS headers or leave out the decoder description. Returns null if anything is off.
+  async function encodeChecked(outs, N, rate, ch) {
+    const cfg = { codec: 'mp4a.40.2', sampleRate: rate, numberOfChannels: ch, bitrate: 192000 };
+    try { if (!(await AudioEncoder.isConfigSupported(cfg)).supported) return null; } catch (err) { return null; }
+    const chunks = [];
+    let meta0 = null, err = null;
+    try {
+      const enc = new AudioEncoder({
+        output: (c, m) => {
+          const d = new Uint8Array(c.byteLength);
+          c.copyTo(d);
+          chunks.push({ d, ts: c.timestamp, dur: c.duration || Math.round(1024 / rate * 1e6) });
+          if (!meta0 && m && m.decoderConfig) meta0 = m.decoderConfig;
+        },
+        error: (e) => { err = e; },
+      });
+      enc.configure(cfg);
+      const step = 4096;
+      for (let i = 0; i < N; i += step) {
+        const n = Math.min(step, N - i), data = new Float32Array(n * ch);
+        for (let k = 0; k < ch; k++) data.set(outs[k].subarray(i, i + n), k * n);
+        const ad = new AudioData({ format: 'f32-planar', sampleRate: rate, numberOfFrames: n, numberOfChannels: ch, timestamp: Math.round(i / rate * 1e6), data });
+        enc.encode(ad);
+        ad.close();
+        while (enc.encodeQueueSize > 16 && !err) await sleep(2);
+        if (err) break;
+        if (joinCancelled) throw new Error('cancelled');
+      }
+      if (!err) await enc.flush();
+      try { enc.close(); } catch (e) {}
+    } catch (e) { if (e && e.message === 'cancelled') throw e; err = err || e; }
+    if (err) { jlog('voice boost: encoder error ' + describe(err)); return null; }
+    if (!chunks.length) { jlog('voice boost: encoder gave no sound'); return null; }
+    // Some encoders wrap every frame in an ADTS header; MP4 needs the bare frame
+    let note = 'raw AAC';
+    const first = chunks[0].d;
+    if (first.length > 7 && first[0] === 0xff && (first[1] & 0xf6) === 0xf0) {
+      for (const c of chunks) { const hl = (c.d[1] & 1) ? 7 : 9; c.d = c.d.subarray(hl); }
+      note = 'ADTS headers removed';
+    }
+    let desc = meta0 && meta0.description ? new Uint8Array(meta0.description.buffer || meta0.description, meta0.description.byteOffset || 0, meta0.description.byteLength) : null;
+    if (!desc || desc.length < 2) { desc = aacConfig(rate, ch); note += ', description added'; }
+    const decoderConfig = { codec: 'mp4a.40.2', sampleRate: rate, numberOfChannels: ch, description: desc };
+    // Proof: decode the loudest second and make sure there is real sound in it
+    if (window.AudioDecoder && window.EncodedAudioChunk) {
+      let best = 0, bestAt = 0;
+      const win = Math.round(rate * 0.1);
+      for (let i = 0; i + win <= N; i += win) { let m = 0; for (let j = i; j < i + win; j += 4) { const v = Math.abs(outs[0][j]); if (v > m) m = v; } if (m > best) { best = m; bestAt = i / rate; } }
+      const pick = chunks.filter((c) => c.ts / 1e6 >= bestAt - 0.5 && c.ts / 1e6 <= bestAt + 0.5);
+      let heard = 0, decErr = null;
+      try {
+        const dec = new AudioDecoder({
+          output: (ad) => {
+            const n = ad.numberOfFrames, buf = new Float32Array(n);
+            try { ad.copyTo(buf, { planeIndex: 0, format: 'f32-planar' }); } catch (e) { try { ad.copyTo(buf, { planeIndex: 0 }); } catch (e2) {} }
+            for (let i = 0; i < n; i++) { const v = Math.abs(buf[i]); if (v > heard) heard = v; }
+            ad.close();
+          },
+          error: (e) => { decErr = e; },
+        });
+        dec.configure(decoderConfig);
+        for (const c of pick) dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: c.ts, data: c.d }));
+        await dec.flush();
+        try { dec.close(); } catch (e) {}
+      } catch (e) { decErr = decErr || e; }
+      if (decErr) { jlog('voice boost: check failed, ' + describe(decErr)); return null; }
+      if (best > 0.01 && heard < best * 0.2) { jlog('voice boost: check failed, decoded sound too quiet (' + heard.toFixed(3) + ' vs ' + best.toFixed(3) + ')'); return null; }
+      note += ', check passed';
+    }
+    return { chunks, decoderConfig, note };
+  }
+
   async function pickAudioConfig(rate, ch) {
     for (const codec of ['mp4a.40.2', 'opus']) {
       const cfg = { codec, sampleRate: rate, numberOfChannels: ch, bitrate: 192000 };
@@ -1843,13 +1984,20 @@ svg { display: block; }
 
     // Sound: copy the recorded AAC straight across when every take has it (no re-encoding, works on older iPhones);
     // otherwise encode it, which needs iOS 26 or a recent desktop browser
+    for (let i = 0; i < clips.length; i++) {
+      if (!clips[i].audio && parsed[i].aac) {
+        try { clips[i].audio = await decodeAacPackets(parsed[i].aac); jlog('take ' + (i + 1) + ': sound read from its AAC frames'); }
+        catch (err) { jlog('take ' + (i + 1) + ': sound could not be decoded (' + describe(err) + ')'); }
+      }
+    }
     const a0 = parsed[0].aac;
     const copySound = !!a0 && parsed.every((p) => p.aac && p.aac.rate === a0.rate && p.aac.ch === a0.ch && p.aac.asc.join() === a0.asc.join());
     const withSound = clips.find((c) => c.audio);
     let rate, ch, acfg = null, boost = false;
     // Voice boost re-encodes the sound with a level adjustment; it needs an AAC encoder (iOS 26 and later)
     if (settings.boost !== 'off' && withSound && window.AudioEncoder && window.AudioData) {
-      const r0 = withSound.audio.sampleRate, c0 = Math.min(2, withSound.audio.numberOfChannels);
+      const r0 = copySound ? a0.rate : withSound.audio.sampleRate;
+      const c0 = copySound ? a0.ch : Math.min(2, withSound.audio.numberOfChannels);
       const cfg = await pickAudioConfig(r0, c0);
       if (cfg && (cfg.codec !== 'opus' || !copySound)) { boost = true; acfg = cfg; rate = r0; ch = c0; }
     }
@@ -2037,9 +2185,14 @@ svg { display: block; }
 
     el.joinText.textContent = 'Adding the sound…';
     st.stage = 'adding the sound';
-    if (copy) {
-      // Each AAC frame is 1024 samples; frames are laid end to end on the same timeline as the picture,
-      // with silent frames for the pauses
+    const finishFile = () => {
+      muxer.finalize();
+      el.joinBar.style.width = '100%';
+      return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    };
+    // The recorded AAC copied as it is: each frame is 1024 samples, laid end to end on the picture's timeline,
+    // with silent frames for the pauses
+    const copyOriginalSound = () => {
       const fdur = 1024 / rate;
       const silent = new Uint8Array(ch === 1 ? [0x00, 0xc8, 0x00, 0x80, 0x23, 0x80] : [0x21, 0x00, 0x49, 0x90, 0x02, 0x19, 0x00, 0x23, 0x80]);
       const meta = { decoderConfig: { codec: 'mp4a.40.2', sampleRate: rate, numberOfChannels: ch, description: a0.asc } };
@@ -2059,13 +2212,10 @@ svg { display: block; }
           if (t >= r[0] - fdur / 2 && t < r[1] - fdur / 2) put(s.data);
         }
         at += len;
-        a.samples.length = 0;
       });
       while (cursor < total - fdur / 2) put(silent);
-      muxer.finalize();
-      el.joinBar.style.width = '100%';
-      return new Blob([muxer.target.buffer], { type: 'video/mp4' });
-    }
+    };
+    if (copy) { copyOriginalSound(); return finishFile(); }
 
     // Sound: the same cuts and pauses, sample-exact, with tiny fades so cuts do not click
     const N = Math.max(1, Math.round(total * rate));
@@ -2089,6 +2239,13 @@ svg { display: block; }
       }
       off += len;
     });
+    let mixPeak = 0;
+    for (let k = 0; k < ch; k++) { const d = outs[k]; for (let i = 0; i < N; i += 7) { const v = Math.abs(d[i]); if (v > mixPeak) mixPeak = v; } }
+    if (mixPeak < 1e-4 && copySound) {
+      jlog('sound: the decoded mix was silent, so the original recorded sound was used');
+      copyOriginalSound();
+      return finishFile();
+    }
     if (boost) {
       // Bring speech to about -16 dBFS (measured over the parts with voice), up to +24 dB,
       // and hold peaks under -1 dBFS with a soft limiter so nothing clips or distorts
@@ -2111,6 +2268,19 @@ svg { display: block; }
         }
       }
       jlog('voice boost: speech level ' + (rms ? (20 * Math.log10(rms)).toFixed(1) : '-inf') + ' dBFS, gain +' + (20 * Math.log10(gain)).toFixed(1) + ' dB');
+      // Encode, then prove the result plays back with sound before it goes into the video
+      const enc = /^mp4a/.test(acfg.codec) ? await encodeChecked(outs, N, rate, ch) : null;
+      if (enc) {
+        enc.chunks.forEach((c, i) => muxer.addAudioChunkRaw(c.d, 'key', c.ts, c.dur, i === 0 ? { decoderConfig: enc.decoderConfig } : undefined));
+        jlog('voice boost: ' + enc.chunks.length + ' sound frames encoded and checked (' + enc.note + ')');
+        return finishFile();
+      }
+      if (copySound) {
+        jlog('voice boost: the boosted sound did not check out on this phone, so the original sound was used');
+        copyOriginalSound();
+        return finishFile();
+      }
+      jlog('voice boost: encoding with ' + acfg.codec);   // no recorded AAC to fall back on: use the standard encoder below
     }
     const aenc = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: (e) => { failure = e; } });
     aenc.configure(acfg);
@@ -2127,9 +2297,7 @@ svg { display: block; }
     await aenc.flush();
     aenc.close();
     if (failure) throw failure;
-    muxer.finalize();
-    el.joinBar.style.width = '100%';
-    return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    return finishFile();
   }
 
   async function joinAll() {
