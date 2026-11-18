@@ -483,6 +483,9 @@ svg { display: block; }
       <div class="section-header">Bitrate (Mbps)</div>
       <div class="group"><div class="segmented" id="optBit"></div></div>
       <p class="section-footer">Higher keeps more detail but makes bigger files.</p>
+      <div class="section-header">Sound</div>
+      <div class="group"><div class="segmented" id="optBoost"></div></div>
+      <p class="section-footer">The iPhone gives web apps a quiet, unprocessed microphone. Voice Boost raises your voice to a standard loudness when you join, with a gentle limiter so it never distorts.</p>
     </div>
   </div>
 </div>
@@ -529,7 +532,7 @@ svg { display: block; }
   const el = {
     live: $('live'), camOff: $('camOff'), startCam: $('startCam'), flipBtn: $('flipBtn'), lensBtn: $('lensBtn'), vfInfo: $('vfInfo'), viewfinder: document.querySelector('.viewfinder'),
     optBtn: $('optBtn'), gapBack: $('gapBack'), gapList: $('gapList'), gapCancel: $('gapCancel'),
-    optBack: $('optBack'), optNow: $('optNow'), optCam: $('optCam'), optRes: $('optRes'), optFps: $('optFps'), optBit: $('optBit'), optDone: $('optDone'),
+    optBack: $('optBack'), optNow: $('optNow'), optCam: $('optCam'), optRes: $('optRes'), optFps: $('optFps'), optBit: $('optBit'), optBoost: $('optBoost'), optDone: $('optDone'),
     recBadge: $('recBadge'), badgeTime: $('badgeTime'),
     meter: $('meter'), timer: $('timer'), rec: $('rec'),
     status: $('status'), statusBtn: $('statusBtn'),
@@ -765,7 +768,7 @@ svg { display: block; }
     { id: 'vhigh', label: '20 Mbps', bps: 20000000 },
     { id: 'max', label: '35 Mbps', bps: 35000000 },
   ];
-  const settings = { res: '1080', fps: 30, bits: 'high' };
+  const settings = { res: '1080', fps: 30, bits: 'high', boost: 'on' };
   try { Object.assign(settings, JSON.parse(localStorage.getItem('vc-settings') || '{}')); } catch (err) {}
   const resById = (id) => RES.find((r) => r.id === id) || RES[1];
   const bitsNow = () => (BITS.find((b) => b.id === settings.bits) || BITS[1]).bps;
@@ -991,6 +994,7 @@ svg { display: block; }
     el.optCam.innerHTML = chipsHtml(cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
     el.optRes.innerHTML = chipsHtml(RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
     el.optFps.innerHTML = chipsHtml(FPS.map((f) => ({ v: f, t: String(f) })), 'fps', settings.fps);
+    el.optBoost.innerHTML = chipsHtml([{ v: 'on', t: 'Voice Boost' }, { v: 'off', t: 'Original Level' }], 'boost', settings.boost);
     el.optBit.innerHTML = chipsHtml(BITS.map((b) => ({ v: b.id, t: String(Math.round(b.bps / 1e6)) })), 'bits', settings.bits);
     const now = el.vfInfo.textContent.replace(/^\S+ /, '');
     el.optNow.textContent = !stream ? 'Turn on the camera to see what it records.'
@@ -1019,6 +1023,7 @@ svg { display: block; }
     if (k === 'res') settings.res = v;
     else if (k === 'fps') settings.fps = Number(v);
     else if (k === 'bits') settings.bits = v;
+    else if (k === 'boost') settings.boost = v;
     else if (k === 'cam') {
       if (v === 'front') facing = 'user';
       else { facing = 'environment'; lensIndex = Number(v.slice(4)) || 0; }
@@ -1026,7 +1031,7 @@ svg { display: block; }
     }
     saveSettings();
     renderOptions();
-    if (k !== 'bits' && stream) {
+    if (k !== 'bits' && k !== 'boost' && stream) {
       el.optNow.textContent = 'Applying…';
       await startCamera();
       renderOptions();
@@ -1841,9 +1846,16 @@ svg { display: block; }
     const a0 = parsed[0].aac;
     const copySound = !!a0 && parsed.every((p) => p.aac && p.aac.rate === a0.rate && p.aac.ch === a0.ch && p.aac.asc.join() === a0.asc.join());
     const withSound = clips.find((c) => c.audio);
-    let rate, ch, acfg = null;
-    if (copySound) { rate = a0.rate; ch = a0.ch; }
-    else {
+    let rate, ch, acfg = null, boost = false;
+    // Voice boost re-encodes the sound with a level adjustment; it needs an AAC encoder (iOS 26 and later)
+    if (settings.boost !== 'off' && withSound && window.AudioEncoder && window.AudioData) {
+      const r0 = withSound.audio.sampleRate, c0 = Math.min(2, withSound.audio.numberOfChannels);
+      const cfg = await pickAudioConfig(r0, c0);
+      if (cfg && (cfg.codec !== 'opus' || !copySound)) { boost = true; acfg = cfg; rate = r0; ch = c0; }
+    }
+    const copy = copySound && !boost;
+    if (copy) { rate = a0.rate; ch = a0.ch; }
+    else if (!boost) {
       rate = withSound ? withSound.audio.sampleRate : 48000;
       ch = withSound ? Math.min(2, withSound.audio.numberOfChannels) : 2;
       if (window.AudioEncoder && window.AudioData) acfg = await pickAudioConfig(rate, ch);
@@ -1893,8 +1905,8 @@ svg { display: block; }
     const g = canvas.getContext('2d');
     g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
     const totalTicks = Math.max(1, Math.round(total * fps));
-    let tick = 0, lastKey = -1e9;
-    jlog('joining at ' + W + 'x' + H + ' ' + vcfg.codec + ' ' + Math.round(vcfg.bitrate / 1e6) + 'M, ' + fps + ' fps, sound ' + (copySound ? 'copied' : acfg.codec));
+    let tick = 0, lastKey = -1e9, drawnAny = false;
+    jlog('joining at ' + W + 'x' + H + ' ' + vcfg.codec + ' ' + Math.round(vcfg.bitrate / 1e6) + 'M, ' + fps + ' fps, sound ' + (copy ? 'copied' : acfg.codec + (boost ? ' + voice boost' : '')));
     const tickTime = () => tick / fps;
     const emit = async () => {
       if (venc.state === 'closed' && !failure && opts.batch) await resumeEncoder();
@@ -1932,6 +1944,8 @@ svg { display: block; }
       const place = async (t, draw) => {
         const o = off + (t - r[0]);
         if (o < end) {
+          // the very first picture also fills the opening frame, so the video (and its thumbnail) never starts black
+          if (!drawnAny) { draw(); drawnAny = true; }
           while (tickTime() < o - 1e-6 && tickTime() < end - 1e-6) { await emit(); await settle(); }
           draw();
         }
@@ -2023,7 +2037,7 @@ svg { display: block; }
 
     el.joinText.textContent = 'Adding the sound…';
     st.stage = 'adding the sound';
-    if (copySound) {
+    if (copy) {
       // Each AAC frame is 1024 samples; frames are laid end to end on the same timeline as the picture,
       // with silent frames for the pauses
       const fdur = 1024 / rate;
@@ -2075,6 +2089,29 @@ svg { display: block; }
       }
       off += len;
     });
+    if (boost) {
+      // Bring speech to about -16 dBFS (measured over the parts with voice), up to +24 dB,
+      // and hold peaks under -1 dBFS with a soft limiter so nothing clips or distorts
+      const win = Math.round(rate * 0.02);
+      let pow = 0, cnt = 0;
+      for (let i = 0; i + win <= N; i += win) {
+        let s2 = 0;
+        for (let k = 0; k < ch; k++) { const d = outs[k]; for (let j = i; j < i + win; j += 2) s2 += d[j] * d[j]; }
+        s2 /= ch * Math.ceil(win / 2);
+        if (s2 > 1e-5) { pow += s2; cnt++; }      // windows louder than about -50 dBFS count as voice
+      }
+      const rms = cnt ? Math.sqrt(pow / cnt) : 0;
+      const gain = rms ? Math.max(1, Math.min(16, 0.158 / rms)) : 1;
+      const knee = 0.8, room = 0.89 - knee;
+      for (let k = 0; k < ch; k++) {
+        const d = outs[k];
+        for (let i = 0; i < N; i++) {
+          const y = d[i] * gain, a = Math.abs(y);
+          d[i] = a <= knee ? y : Math.sign(y) * (knee + room * Math.tanh((a - knee) / room));
+        }
+      }
+      jlog('voice boost: speech level ' + (rms ? (20 * Math.log10(rms)).toFixed(1) : '-inf') + ' dBFS, gain +' + (20 * Math.log10(gain)).toFixed(1) + ' dB');
+    }
     const aenc = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: (e) => { failure = e; } });
     aenc.configure(acfg);
     const step = 4096;
