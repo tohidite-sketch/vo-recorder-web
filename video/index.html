@@ -507,7 +507,7 @@ svg { display: block; }
       <p class="section-footer">Higher keeps more detail but makes bigger files.</p>
       <div class="section-header">Sound</div>
       <div class="group"><div class="segmented" id="optBoost"></div></div>
-      <p class="section-footer">The iPhone gives web apps a quiet, unprocessed microphone. Voice Boost raises your voice to a standard loudness when you join, with a gentle limiter so it never distorts.</p>
+      <p class="section-footer">The iPhone gives web apps a quiet, raw microphone. When you join, Boost evens out your voice and brings it to YouTube loudness; Extra Loud goes about 3 dB louder still. Peaks are held just under the maximum so it never crackles. Takes play at their recorded level until they are joined.</p>
     </div>
   </div>
 </div>
@@ -814,6 +814,7 @@ svg { display: block; }
   ];
   const settings = { res: '1080', fps: 30, bits: 'high', boost: 'on' };
   try { Object.assign(settings, JSON.parse(localStorage.getItem('vc-settings') || '{}')); } catch (err) {}
+  if (!['off', 'on', 'max'].includes(settings.boost)) settings.boost = 'on';
   const resById = (id) => RES.find((r) => r.id === id) || RES[1];
   const bitsNow = () => (BITS.find((b) => b.id === settings.bits) || BITS[1]).bps;
   const saveSettings = () => { try { localStorage.setItem('vc-settings', JSON.stringify(settings)); } catch (err) {} };
@@ -1075,7 +1076,7 @@ svg { display: block; }
     setChips(el.optCam, cams, 'cam', facing === 'user' ? 'front' : 'back' + lensIndex);
     setChips(el.optRes, RES.map((r) => ({ v: r.id, t: r.label })), 'res', settings.res);
     setChips(el.optFps, FPS.map((f) => ({ v: f, t: String(f) })), 'fps', settings.fps);
-    setChips(el.optBoost, [{ v: 'on', t: 'Voice Boost' }, { v: 'off', t: 'Original Level' }], 'boost', settings.boost);
+    setChips(el.optBoost, [{ v: 'off', t: 'Original' }, { v: 'on', t: 'Boost' }, { v: 'max', t: 'Extra Loud' }], 'boost', settings.boost);
     setChips(el.optBit, BITS.map((b) => ({ v: b.id, t: String(Math.round(b.bps / 1e6)) })), 'bits', settings.bits);
     const now = el.vfInfo.textContent.replace(/^\S+ /, '');
     el.optNow.textContent = !stream ? 'Turn on the camera to see what it records.'
@@ -1976,6 +1977,112 @@ svg { display: block; }
   }
 
   // AAC 'AudioSpecificConfig' (2 bytes) for AAC-LC, used when the encoder does not supply one
+  // Voice processing for Voice Boost: like a radio/podcast chain, done on the whole joined sound at once.
+  // Rumble filter -> level to a working point -> gentle noise reduction between words -> compressor
+  // (evens out loud and soft words) -> make-up to the target loudness -> look-ahead peak limiter (-1 dBFS).
+  function biquad(d, c) {
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < d.length; i++) {
+      const x = d[i], y = c[0] * x + c[1] * x1 + c[2] * x2 - c[3] * y1 - c[4] * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y; d[i] = y;
+    }
+  }
+  function shelfCoef(fs, fc, g, q) {
+    const A = Math.pow(10, g / 40), w = 2 * Math.PI * fc / fs, cs = Math.cos(w), al = Math.sin(w) / (2 * q), sa = 2 * Math.sqrt(A) * al;
+    const a0 = (A + 1) - (A - 1) * cs + sa;
+    return [A * ((A + 1) + (A - 1) * cs + sa) / a0, -2 * A * ((A - 1) + (A + 1) * cs) / a0, A * ((A + 1) + (A - 1) * cs - sa) / a0,
+      2 * ((A - 1) - (A + 1) * cs) / a0, ((A + 1) - (A - 1) * cs - sa) / a0];
+  }
+  function highpassCoef(fs, fc, q) {
+    const w = 2 * Math.PI * fc / fs, cs = Math.cos(w), al = Math.sin(w) / (2 * q), a0 = 1 + al;
+    return [(1 + cs) / 2 / a0, -(1 + cs) / a0, (1 + cs) / 2 / a0, -2 * cs / a0, (1 - al) / a0];
+  }
+  // Integrated loudness in LUFS (ITU-R BS.1770: K-weighting, 400 ms blocks, gated)
+  function loudness(outs, N, rate) {
+    const ks = shelfCoef(rate, 1681.974450955533, 3.999843853973347, 0.7071752369554193);
+    const kh = highpassCoef(rate, 38.13547087602444, 0.5003270373238773);
+    const blk = Math.round(0.4 * rate), hop = Math.round(0.1 * rate);
+    const nb = N >= blk ? Math.floor((N - blk) / hop) + 1 : 0;
+    if (!nb) return -Infinity;
+    const z = new Float64Array(nb);
+    for (const src of outs) {
+      const d = Float32Array.from(src.subarray(0, N));
+      biquad(d, ks); biquad(d, kh);
+      // running sum of squares per hop, then 4 hops make a block
+      const hops = new Float64Array(Math.floor(N / hop));
+      for (let h = 0; h < hops.length; h++) { let s = 0; for (let i = h * hop, e = i + hop; i < e; i++) s += d[i] * d[i]; hops[h] = s; }
+      for (let b = 0; b < nb; b++) z[b] += (hops[b] + hops[b + 1] + hops[b + 2] + hops[b + 3]) / blk;
+    }
+    const L = (p) => -0.691 + 10 * Math.log10(p);
+    let s = 0, n = 0;
+    for (let b = 0; b < nb; b++) if (L(z[b]) > -70) { s += z[b]; n++; }
+    if (!n) return -Infinity;
+    const rel = L(s / n) - 10;
+    s = 0; n = 0;
+    for (let b = 0; b < nb; b++) if (L(z[b]) > -70 && L(z[b]) > rel) { s += z[b]; n++; }
+    return n ? L(s / n) : -Infinity;
+  }
+  function voiceProcess(outs, N, rate, target) {
+    const hp = highpassCoef(rate, 80, 0.7071);
+    outs.forEach((d) => biquad(d.subarray(0, N), hp));
+    const inL = loudness(outs, N, rate);
+    if (!isFinite(inL)) return { inL, outL: inL, pre: 0 };
+    // 1. working level -20 LUFS (at most +36 dB, for a very quiet microphone)
+    const pre = Math.max(-12, Math.min(36, -20 - inL));
+    const g0 = Math.pow(10, pre / 20);
+    // 2. noise reduction between words + compressor, worked out every 32 samples (0.7 ms) and blended smoothly
+    const B = 32, att = Math.exp(-B / (0.003 * rate)), rel = Math.exp(-B / (0.15 * rate)), gs = Math.exp(-B / (0.02 * rate));
+    const thr = -18, ratio = 3, knee = 6, gateThr = -50, gateMax = 10;
+    let env = 0, gsm = 1;
+    for (let i0 = 0; i0 < N; i0 += B) {
+      const i1 = Math.min(N, i0 + B);
+      let a = 0;
+      for (let k = 0; k < outs.length; k++) { const d = outs[k]; for (let i = i0; i < i1; i++) { const v = d[i] < 0 ? -d[i] : d[i]; if (v > a) a = v; } }
+      a *= g0;
+      env = a > env ? a + (env - a) * att : a + (env - a) * rel;
+      const lv = 20 * Math.log10(env + 1e-9);
+      let gr = 0;                                            // dB of change
+      const over = lv - thr;
+      if (over > knee / 2) gr = -over * (1 - 1 / ratio);
+      else if (over > -knee / 2) gr = -(1 - 1 / ratio) * (over + knee / 2) * (over + knee / 2) / (2 * knee);
+      if (lv < gateThr) gr -= Math.min(gateMax, gateThr - lv);   // 1:2 downward expansion, at most 10 dB
+      const g = Math.pow(10, gr / 20), prev = gsm;
+      gsm = g < gsm ? g : g + (gsm - g) * gs;                // close quickly, open smoothly
+      const n = i1 - i0, step = (gsm - prev) / n;
+      for (let c = 0; c < outs.length; c++) { const d = outs[c]; let k = prev * g0; const st = step * g0; for (let i = i0; i < i1; i++) { k += st; d[i] *= k; } }
+    }
+    // 3. make-up gain to the target loudness
+    const mid = loudness(outs, N, rate);
+    const mk = isFinite(mid) ? Math.pow(10, Math.max(-12, Math.min(24, target - mid)) / 20) : 1;
+    // 4. look-ahead limiter: the gain starts dipping 5 ms before a peak, so nothing is cut or distorted
+    const ceil = 0.891, L = Math.max(1, Math.round(0.005 * rate)), relL = Math.exp(-1 / (0.08 * rate));
+    const need = new Float32Array(N);
+    const d0 = outs[0], d1 = outs[1] || outs[0];
+    for (let i = 0; i < N; i++) {
+      const v0 = d0[i] < 0 ? -d0[i] : d0[i], v1 = d1[i] < 0 ? -d1[i] : d1[i];
+      const a = (v0 > v1 ? v0 : v1) * mk;
+      need[i] = a > ceil ? ceil / a : 1;
+    }
+    // minimum of need[i .. i+L] (sliding window), then a slow release, then a short average to smooth the dip
+    const m = new Float32Array(N), q = new Int32Array(N + L + 1);
+    let qh = 0, qt = 0;
+    for (let i = N - 1; i >= 0; i--) {
+      while (qt > qh && need[q[qt - 1]] >= need[i]) qt--;
+      q[qt++] = i;
+      while (q[qh] > i + L) qh++;
+      m[i] = need[q[qh]];
+    }
+    let r = 1;
+    for (let i = 0; i < N; i++) { const up = 1 + (r - 1) * relL; r = m[i] < up ? m[i] : up; m[i] = r; }
+    let acc = 0;
+    for (let i = 0; i < N; i++) {
+      acc += m[i]; if (i >= L) acc -= m[i - L];
+      const g = mk * acc / (i < L ? i + 1 : L);
+      for (let k = 0; k < outs.length; k++) { const d = outs[k], v = d[i] * g; d[i] = v > 0.999 ? 0.999 : v < -0.999 ? -0.999 : v; }
+    }
+    return { inL, outL: loudness(outs, N, rate), pre };
+  }
+
   function aacConfig(rate, ch) {
     const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
     const idx = Math.max(0, rates.indexOf(rate));
@@ -2063,7 +2170,7 @@ svg { display: block; }
     return null;
   }
 
-  let joinLog = [];
+  let joinLog = [], soundNote = '';
   const jlog = (line) => { joinLog.push(((performance.now() / 1000).toFixed(1)) + 's ' + line); };
 
   const describe = (e) => {
@@ -2131,6 +2238,11 @@ svg { display: block; }
       const c0 = copySound ? a0.ch : Math.min(2, withSound.audio.numberOfChannels);
       const cfg = await pickAudioConfig(r0, c0);
       if (cfg && (cfg.codec !== 'opus' || !copySound)) { boost = true; acfg = cfg; rate = r0; ch = c0; }
+      else { soundNote = 'Voice Boost is not available on this phone (no sound encoder), so the sound is at its recorded level.'; jlog('voice boost: no AAC encoder (' + (cfg ? cfg.codec : 'none') + ')'); }
+    }
+    else if (settings.boost !== 'off' && withSound) {
+      soundNote = 'Voice Boost needs iOS 26 or later, so the sound is at its recorded level.';
+      jlog('voice boost: this browser has no AudioEncoder');
     }
     const copy = copySound && !boost;
     if (copy) { rate = a0.rate; ch = a0.ch; }
@@ -2378,27 +2490,13 @@ svg { display: block; }
       return finishFile();
     }
     if (boost) {
-      // Bring speech to about -16 dBFS (measured over the parts with voice), up to +24 dB,
-      // and hold peaks under -1 dBFS with a soft limiter so nothing clips or distorts
-      const win = Math.round(rate * 0.02);
-      let pow = 0, cnt = 0;
-      for (let i = 0; i + win <= N; i += win) {
-        let s2 = 0;
-        for (let k = 0; k < ch; k++) { const d = outs[k]; for (let j = i; j < i + win; j += 2) s2 += d[j] * d[j]; }
-        s2 /= ch * Math.ceil(win / 2);
-        if (s2 > 1e-5) { pow += s2; cnt++; }      // windows louder than about -50 dBFS count as voice
-      }
-      const rms = cnt ? Math.sqrt(pow / cnt) : 0;
-      const gain = rms ? Math.max(1, Math.min(16, 0.158 / rms)) : 1;
-      const knee = 0.8, room = 0.89 - knee;
-      for (let k = 0; k < ch; k++) {
-        const d = outs[k];
-        for (let i = 0; i < N; i++) {
-          const y = d[i] * gain, a = Math.abs(y);
-          d[i] = a <= knee ? y : Math.sign(y) * (knee + room * Math.tanh((a - knee) / room));
-        }
-      }
-      jlog('voice boost: speech level ' + (rms ? (20 * Math.log10(rms)).toFixed(1) : '-inf') + ' dBFS, gain +' + (20 * Math.log10(gain)).toFixed(1) + ' dB');
+      // Voice processing to YouTube loudness (-14 LUFS) or louder (-11 LUFS), peaks held under -1 dBFS
+      el.joinText.textContent = 'Making your voice louder…';
+      await sleep(30);
+      const target = settings.boost === 'max' ? -11 : -14;
+      const vp = voiceProcess(outs, N, rate, target);
+      jlog('voice boost: ' + (isFinite(vp.inL) ? vp.inL.toFixed(1) : '-inf') + ' LUFS -> ' + (isFinite(vp.outL) ? vp.outL.toFixed(1) : '-inf') + ' LUFS (target ' + target + ')');
+      if (isFinite(vp.inL) && isFinite(vp.outL)) soundNote = (settings.boost === 'max' ? 'Extra Loud' : 'Voice Boost') + ': voice raised by ' + Math.max(0, Math.round(vp.outL - vp.inL)) + ' dB.';
       // Encode, then prove the result plays back with sound before it goes into the video
       const enc = /^mp4a/.test(acfg.codec) ? await encodeChecked(outs, N, rate, ch) : null;
       if (enc) {
@@ -2407,6 +2505,7 @@ svg { display: block; }
         return finishFile();
       }
       if (copySound) {
+        soundNote = 'Voice Boost could not be saved on this phone, so the sound is at its recorded level.';
         jlog('voice boost: the boosted sound did not check out on this phone, so the original sound was used');
         copyOriginalSound();
         return finishFile();
@@ -2443,7 +2542,7 @@ svg { display: block; }
     // The camera is switched off while joining: it frees the phone's video hardware
     if (stream) { stopCamera(); el.camOff.hidden = false; el.flipBtn.hidden = true; }
     let blob = null, why = '';
-    joinLog = [];
+    joinLog = []; soundNote = '';
     el.joinSave.textContent = 'Save Video';
     el.joinSave.dataset.mode = 'save';
     jlog('browser: ' + navigator.userAgent);
@@ -2580,7 +2679,7 @@ svg { display: block; }
     haptic('double');
     el.joinBar.style.width = '100%';
     el.joinTitle.textContent = 'Your video is ready';
-    el.joinText.textContent = clock(joinedSeconds()) + ' long, ' + (blob.size / 1048576).toFixed(1) + ' MB. ' +
+    el.joinText.textContent = clock(joinedSeconds()) + ' long, ' + (blob.size / 1048576).toFixed(1) + ' MB. ' + (soundNote ? soundNote + ' ' : '') +
       (IS_IOS ? 'Tap Save Video, then choose Save Video or send it to your editing app.' : 'Tap Save Video to download it.');
     el.joinSave.hidden = false;
     el.joinClose.textContent = 'Close';
